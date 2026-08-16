@@ -264,12 +264,22 @@ void build_text() {
     HidGamepadLayout const &layout = generic_hid_active_layout();
     const uint16_t descriptor_len = hid_report_descriptor_length();
 
-    append("\n--- DS5 BRIDGE STELLARIS ---\n");
+    append("\n--- DS5 BRIDGE ---\n");
     append(
         "FW %u.%u.%u\n",
         (unsigned int) DS5_FIRMWARE_VERSION_MAJOR,
         (unsigned int) DS5_FIRMWARE_VERSION_MINOR,
         (unsigned int) DS5_FIRMWARE_VERSION_PATCH
+    );
+    // What the bridge decided this controller is, and what it is presenting to
+    // the host as a result. The first thing to check when anything looks wrong:
+    // if these disagree with the pad in your hand, classification is the bug and
+    // nothing below it means much.
+    append(
+        "MODE %s  PERSONA %s  TYPE %u\n",
+        bridge_mode_is_stellaris() ? "GENERIC HID" : "DUALSENSE",
+        host_persona_active() == HostPersonaModeXusb360 ? "XBOX 360" : "NATIVE HID",
+        (unsigned int) bt_controller_type()
     );
     append(
         "SDP %s (%u BYTES, CODE %u)\n",
@@ -491,12 +501,11 @@ void build_guided_result(bool timed_out, uint32_t mask, uint16_t hat) {
 } // namespace
 
 void stellaris_diagnostics_request_dump() {
-    // Only meaningful for a generic pad. With a DualSense connected the layout
-    // is known, the companion app is the diagnostic surface, and typing into
-    // the user's editor would be pure surprise.
-    if (!bridge_mode_is_stellaris()) {
-        return;
-    }
+    // Deliberately not gated on bridge mode. An earlier version refused to run
+    // unless a generic pad was detected, which made the dump useless in exactly
+    // the case you need it: when detection has gone wrong and you want to know
+    // what the bridge thinks it is talking to. The mode is reported in the
+    // header instead.
     // Three-state cycle on the one free gesture: dump and capture input, then
     // probe for a working rumble format, then stop. Stopping matters -- neither
     // phase should be left running into whatever window gets focus next.

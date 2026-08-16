@@ -44,6 +44,7 @@
 #include "bridge_mode.h"
 #include "generic_hid_input_decoder.h"
 #include "hid_report_descriptor.h"
+#include "stellaris_diagnostics.h"
 #include "bluetooth_sdp.h"
 #include "classic/sdp_client.h"
 #include "classic/sdp_server.h"
@@ -2874,6 +2875,7 @@ static void stellaris_begin_descriptor_query() {
     hid_report_descriptor_reset();
     generic_hid_reset();
     bridge_latency_reset();
+    stellaris_diagnostics_reset();
     hid_descriptor_scan_state = HidDescriptorScanError;
     hid_descriptor_query_active = true;
     hid_report_descriptor_set_status(HidDescriptorFetchPending, 0);

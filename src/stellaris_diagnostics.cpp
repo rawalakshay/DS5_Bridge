@@ -513,8 +513,31 @@ void stellaris_diagnostics_request_dump() {
     next_event_ms = 0;
 }
 
+void stellaris_diagnostics_reset() {
+    state = DumpState::Idle;
+    text_len = 0;
+    text_cursor = 0;
+    key_is_down = false;
+    next_event_ms = 0;
+    guided_index = 0;
+    guided_phase = GuidedPhase::Prompt;
+    guided_deadline_ms = 0;
+    rumble_index = 0;
+    rumble_driving = false;
+    rumble_until_ms = 0;
+}
+
 void stellaris_diagnostics_poll(uint32_t now_ms) {
     if (state == DumpState::Idle) {
+        return;
+    }
+
+    // Losing the pad ends the run. Note this is not the same as the Pico
+    // rebooting -- in Xbox persona a controller disconnect hard-detaches USB
+    // and re-enumerates, which looks like a restart to the host while this
+    // firmware keeps running with all its state intact.
+    if (!bt_is_controller_connected()) {
+        stellaris_diagnostics_reset();
         return;
     }
     if (next_event_ms != 0 && static_cast<int32_t>(now_ms - next_event_ms) < 0) {

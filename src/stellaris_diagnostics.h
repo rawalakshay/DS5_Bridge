@@ -24,4 +24,10 @@ void stellaris_diagnostics_request_dump();
 // existing watchdog phase; never blocks.
 void stellaris_diagnostics_poll(uint32_t now_ms);
 
+// Abandons any run in progress. Called when a pad connects, and automatically
+// when one drops: a capture that outlives its controller would keep typing into
+// whatever window has focus, and would resume mid-run against a stale baseline
+// once a pad came back.
+void stellaris_diagnostics_reset();
+
 #endif // DS5_BRIDGE_STELLARIS_DIAGNOSTICS_H

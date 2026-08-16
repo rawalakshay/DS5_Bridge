@@ -123,11 +123,15 @@ constexpr KnownLayout kKnownLayouts[] = {
     {"STELLARIS ANDROID", 0x07, 11, kFallbackLayout,
      kAndroidButtonMap, kAndroidButtonMapCount},
 
-    // Stellaris, Windows mode. Completely different shape: buttons first, then
-    // the hat, then four 16-bit little-endian axes centred on 0x8000. No analog
-    // triggers -- the shoulder triggers report as buttons only -- and dense
-    // DirectInput button numbering rather than the Android one.
-    {"STELLARIS WINDOWS", 0x3F, 12,
+    // Stellaris in Windows *or* Nintendo mode -- both produce this identical
+    // report, and both accept the Switch 0x10 rumble frame.
+    //
+    // This is the Nintendo Switch Pro "simple HID" report: buttons, hat, then
+    // four 16-bit little-endian axes centred on 0x8000. Verified byte for byte
+    // in both modes. No analog triggers -- the shoulder triggers report as
+    // buttons only -- and dense DirectInput button numbering rather than the
+    // sparse Android one.
+    {"SWITCH HID (WINDOWS+NINTENDO)", 0x3F, 12,
      {
          /* valid            */ true,
          /* uses_report_id   */ true,

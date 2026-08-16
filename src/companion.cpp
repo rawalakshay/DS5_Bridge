@@ -5,6 +5,7 @@
 #include <cstring>
 
 #include "audio.h"
+#include "bridge_mode.h"
 #include "bt.h"
 #include "controller_output_policy.h"
 #include "controller_output_submit.h"
@@ -898,9 +899,15 @@ void restore_defaults() {
     bt_set_idle_disconnect_timeout_minutes(15);
     usb_set_suspend_disconnect_enabled(true);
     usb_set_hid_polling_rate_mode(2);
-    if (host_persona_active() != HostPersonaModeDualSense) {
+    // Bridge mode is not persisted; the persona reset below is what actually
+    // re-enumerates, so this only clears the mode flag. In a Stellaris-only
+    // image the boot default is Stellaris/XUSB, so this resets to Xbox instead
+    // of dragging the persona back to DualSense.
+    bridge_mode_reset_to_default();
+    const HostPersonaMode default_persona = bridge_mode_persona(bridge_mode_active());
+    if (host_persona_active() != default_persona) {
         host_input_prepare_persona_switch();
-        host_persona_set_active(HostPersonaModeDualSense);
+        host_persona_set_active(default_persona);
         usb_request_reconnect();
     }
 }

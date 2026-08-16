@@ -7,15 +7,16 @@
 #include <algorithm>
 #include <cstdint>
 
+#include "bridge_mode.h"
 #include "bt.h"
 #include "kitsune_button_gesture.h"
+#include "stellaris_diagnostics.h"
 #include "utils.h"
 
 #include "hardware/gpio.h"
 #include "hardware/structs/ioqspi.h"
 #include "hardware/structs/sio.h"
 #include "hardware/sync.h"
-#include "hardware/watchdog.h"
 #if PICO_RP2350
 #include "hardware/regs/sio.h"
 #endif
@@ -91,11 +92,12 @@ static void button_dispatch(kitsune::ButtonGestureEvent event) {
             return;
 
         case kitsune::ButtonGestureEvent::DoubleClick:
-            DS5_LOG("[BTN] BOOTSEL double click - reboot\n");
-            watchdog_reboot(0, 0, 0);
-            while (true) {
-                tight_loop_contents();
-            }
+            DS5_LOG("[BTN] BOOTSEL double click - switch bridge mode\n");
+            // In the Stellaris image the toggle is a no-op -- there is no other
+            // mode -- so the freed gesture types the diagnostic dump instead.
+            (void)bridge_mode_toggle();
+            stellaris_diagnostics_request_dump();
+            return;
 
         case kitsune::ButtonGestureEvent::TripleClick:
             DS5_LOG("[BTN] BOOTSEL triple click - reboot to BOOTSEL\n");
@@ -116,6 +118,11 @@ static void button_dispatch(kitsune::ButtonGestureEvent event) {
 
 void button_check() {
     const uint32_t now = to_ms_since_boot(get_absolute_time());
+    // Serviced ahead of the sample-rate gate so the acknowledgement blink and
+    // the diagnostic dump keep their own cadence instead of being quantised to
+    // the 100 ms BOOTSEL poll.
+    bridge_mode_indicator_poll(now);
+    stellaris_diagnostics_poll(now);
     if (static_cast<uint32_t>(now - button_last_check_ms) < BUTTON_POLL_INTERVAL_MS) {
         return;
     }

@@ -31,7 +31,45 @@ git submodule update --init --recursive
 
 ## Firmware
 
-Build the companion firmware with the Pico SDK toolchain:
+The repo-root `Makefile` wraps the commands below and copies the resulting UF2
+into `uf2_builds/`:
+
+```powershell
+make pico-build PICO_SDK_PATH=/path/to/pico-sdk
+make pico-build DIAGNOSTICS=traces PICO_SDK_PATH=/path/to/pico-sdk
+make stellaris-build PICO_SDK_PATH=/path/to/pico-sdk
+make help
+```
+
+The Makefile covers the Pico 2 W only. Build the Waveshare variant with the
+CMake flag or the script described below.
+
+Built images land in `uf2_builds/` as `ds5-bridge-DDMMYY-HHMM.uf2`, alongside a
+`ds5-bridge-latest.uf2` copy of the most recent build. The images themselves are
+git-ignored. The stamp does not record the board or the diagnostics preset, so a
+`DIAGNOSTICS=traces` image is not distinguishable from a release one by name.
+
+### Stellaris-only image
+
+`make stellaris-build` produces `ds5-bridge-stellaris-DDMMYY-HHMM.uf2` from the
+same sources with `-DSTELLARIS_ONLY=ON`. That image connects to a generic
+Bluetooth HID gamepad instead of a DualSense and always presents as an Xbox 360
+controller. It reads the pad's HID report descriptor over SDP at connect time
+rather than assuming a byte layout, and every DualSense output path -- lightbar,
+haptics, adaptive triggers, speaker, microphone -- is compiled out.
+
+The two images are separate build trees and separate artifacts; flashing
+`pico-build`'s image restores full DualSense behaviour. `STELLARIS_ONLY` requires
+`ENABLE_COMPANION=ON`, because `src/usb_app_drivers.cpp` is the only place the
+XUSB class driver is registered with TinyUSB; the CMake configure fails loudly
+otherwise.
+
+Note the two images link different halves of the input hot path, so
+`cmake/verify_core1_sram.cmake` splits its required-symbol list accordingly. A
+symbol that is legitimately dead in one configuration must move into the right
+branch rather than being dropped from the check.
+
+To drive CMake directly instead:
 
 ```powershell
 cmake -S . -B build/companion -G Ninja `

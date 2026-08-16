@@ -1,0 +1,7 @@
+# Firmware images are build artifacts, not source, matching how the repo
+# already treats companion/*.uf2 and companion/firmware/*.uf2.
+#
+# This file is tracked so the directory always exists for `make` to write into.
+# If you want to commit a specific image (a tagged release candidate, say),
+# force-add it: git add -f uf2_builds/ds5-bridge-160826-1210.uf2
+*.uf2

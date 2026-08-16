@@ -26,23 +26,13 @@ endif()
 set(required_sram_symbols
         "_Z10on_bt_data12CHANNEL_TYPEPht"
         "_Z14interrupt_loopv"
-        "_Z35companion_process_controller_reportPht"
-        "_Z34companion_update_controller_reportPKht"
-        "_ZN12_GLOBAL__N_120queue_shortcut_eventEh|_ZN12_GLOBAL__N_1L20queue_shortcut_eventEh"
-        "_ZN12_GLOBAL__N_127dpad_direction_from_buttonsEbbbb|_ZN12_GLOBAL__N_1L27dpad_direction_from_buttonsEbbbb"
         "_Z33dualsense_decode_usb_input_reportPKhtR21BridgeControllerState"
         "host_persona_active"
         "host_persona_descriptors_verified"
         "_Z25host_persona_encode_input15HostPersonaModeRK21BridgeControllerStateR22HostPersonaInputReport"
-        "_Z30dualsense_persona_encode_inputRK21BridgeControllerStateR22HostPersonaInputReport"
-        "_Z24ds4_persona_encode_inputRK21BridgeControllerStateR22HostPersonaInputReport"
         "_Z28xusb360_persona_encode_inputRK21BridgeControllerStateR22HostPersonaInputReport"
         "_Z17xusb360_usb_readyv"
         "_Z23xusb360_usb_send_reportPKhh"
-        "_Z11set_headsetb"
-        "_Z20audio_mic_add_packetPKht"
-        "_ZL24process_usb_audio_packetv"
-        "_ZL25send_audio_haptics_packetPKabb"
         "_ZL28try_send_pending_audio_batchv"
         "_Z21bt_write_audio_streamPht"
         "_Z12audio_recentv"
@@ -152,6 +142,38 @@ set(required_sram_symbols
         "memset"
         "memmove"
 )
+
+# The two images route controller input through different decoders, so each one
+# links a different half of the hot path and --gc-sections drops the other. A
+# symbol that is legitimately absent must not be demanded, or the check stops
+# meaning anything.
+if(STELLARIS_ONLY)
+    # Input arrives from a generic HID gamepad and is decoded from its report
+    # descriptor.
+    list(APPEND required_sram_symbols
+            "_Z31generic_hid_decode_input_reportPKhtR21BridgeControllerState"
+    )
+else()
+    # The DualSense path: the companion report rewriter (chords, remap,
+    # deadzone), the DualSense and DS4 personas, and the audio carriers that
+    # ride the same 0x31 report. All unreachable in the Stellaris image, where
+    # on_bt_data hands off to the generic decoder before any of it.
+    list(APPEND required_sram_symbols
+            "_Z35companion_process_controller_reportPht"
+            "_Z34companion_update_controller_reportPKht"
+            "_ZN12_GLOBAL__N_120queue_shortcut_eventEh|_ZN12_GLOBAL__N_1L20queue_shortcut_eventEh"
+            "_ZN12_GLOBAL__N_127dpad_direction_from_buttonsEbbbb|_ZN12_GLOBAL__N_1L27dpad_direction_from_buttonsEbbbb"
+            "_Z30dualsense_persona_encode_inputRK21BridgeControllerStateR22HostPersonaInputReport"
+            "_Z24ds4_persona_encode_inputRK21BridgeControllerStateR22HostPersonaInputReport"
+            "_Z11set_headsetb"
+            "_Z20audio_mic_add_packetPKht"
+            "_ZL24process_usb_audio_packetv"
+            # Loses all but one call site once audio_loop returns early, and is
+            # then inlined into try_send_pending_audio_batch, which stays
+            # checked above.
+            "_ZL25send_audio_haptics_packetPKabb"
+    )
+endif()
 
 # RP2350 SRAM spans [0x20000000, 0x20082000).
 set(rp2350_sram_start 536870912)

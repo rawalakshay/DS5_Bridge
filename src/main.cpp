@@ -6,8 +6,11 @@
 #include <algorithm>
 #include <cstdio>
 #include "bsp/board_api.h"
+#include "bridge_latency.h"
+#include "bridge_mode.h"
 #include "button_functions.h"
 #include "bt.h"
+#include "generic_hid_input_decoder.h"
 #include "controller_packet_compositor.h"
 #include "controller_output_policy.h"
 #include "controller_output_submit.h"
@@ -206,6 +209,20 @@ static bool companion_lightbar_override_active() {
 }
 
 void controller_output_submit_usb_payload(uint8_t const *payload, uint16_t payload_len) {
+    if (bridge_mode_is_stellaris()) {
+        // Host rumble arrives here already rendered into a DualSense payload by
+        // the XUSB persona. A generic pad cannot parse that frame, but the two
+        // motor bytes inside it are exactly what we need, so lift them out and
+        // re-send in the pad's own format. Everything else in the payload --
+        // lightbar, triggers, audio -- is dropped.
+        if (payload != nullptr && payload_len > ds5::output::kMotorLeftOffset) {
+            bt_stellaris_set_rumble(
+                payload[ds5::output::kMotorLeftOffset],
+                payload[ds5::output::kMotorRightOffset]
+            );
+        }
+        return;
+    }
     uint8_t outputData[78]{};
     controller_packet_init_bt_output_report(outputData, reportSeqCounter);
     uint16_t payloadLen = payload_len;
@@ -441,6 +458,49 @@ void reset_controller_input_report_cache() {
     critical_section_exit(&report_cs);
 }
 
+#if DS5_DEBUG_LOGS_ENABLED
+// Bring-up aid for non-DualSense controllers. The DualSense path drops every
+// interrupt payload whose report id is not 0x31, so a third-party pad connects
+// and then silently produces nothing. Dumping the rejected payloads here makes
+// the real report layout readable from the companion firmware log, with no
+// UART adapter and no Bluetooth sniffer.
+//
+// Rate limited on purpose: a pad streams far faster than the 8 KiB log ring can
+// hold. The first sighting of each report id is always logged, then at most one
+// sample per second, which is enough to recover a layout by moving one control
+// at a time.
+static void log_unrecognized_bt_report(
+    CHANNEL_TYPE channel,
+    uint8_t const *data,
+    uint16_t len
+) {
+    static uint32_t seen_interrupt_ids = 0;
+    static uint32_t seen_control_ids = 0;
+    static uint32_t last_log_us = 0;
+
+    const uint8_t report_id = len > 1 ? data[1] : 0;
+    const uint32_t id_bit = report_id < 32 ? (1u << report_id) : 0u;
+    uint32_t &seen = channel == INTERRUPT ? seen_interrupt_ids : seen_control_ids;
+    const bool first_of_kind = id_bit != 0 && (seen & id_bit) == 0;
+    const uint32_t now = time_us_32();
+
+    if (!first_of_kind && static_cast<uint32_t>(now - last_log_us) < 1000000u) {
+        return;
+    }
+    seen |= id_bit;
+    last_log_us = now;
+
+    firmware_log_printf(
+        "[RAW] %s id=0x%02X len=%u%s\n",
+        channel == INTERRUPT ? "int" : "ctl",
+        static_cast<unsigned int>(report_id),
+        static_cast<unsigned int>(len),
+        first_of_kind ? " (new)" : ""
+    );
+    firmware_log_hexdump(data, len > 64 ? 64 : len);
+}
+#endif
+
 void interrupt_loop() {
     const uint32_t now = time_us_32();
     if (host_input_quiet_active(now)) {
@@ -477,19 +537,50 @@ void interrupt_loop() {
             : tud_hid_report(safe_report.report_id, safe_report.bytes, safe_report.len);
         if (!queued) {
             DS5_LOG("[USBHID] tud_hid_report error\n");
-            
-            // If the report failed to queue, restore the dirty flag 
+
+            // If the report failed to queue, restore the dirty flag
             // so we try again on the next loop iteration.
             critical_section_enter_blocking(&report_cs);
             report_dirty = true;
             critical_section_exit(&report_cs);
+        } else if (bridge_mode_is_stellaris()) {
+            bridge_latency_note_sent(time_us_32());
         }
     }
 }
 
 void on_bt_data(CHANNEL_TYPE channel, uint8_t *data, uint16_t len) {
     // DS5_LOG("[Main] BT data callback: channel=%u len=%u\n", channel, len);
+    if (bridge_mode_is_stellaris()) {
+        // A generic pad's report ID is whatever its descriptor says, so the
+        // 0x31 filter below would drop everything. Hand the whole HID payload
+        // (data[0] is the 0xA1 transport byte) to the descriptor-driven decoder
+        // and skip every DualSense-shaped consumer: the audio mic carrier, the
+        // byte-53 headset probe, and the companion report rewriter, none of
+        // which mean anything here.
+        if (data == nullptr || channel != INTERRUPT || len <= 1) {
+            return;
+        }
+
+        BridgeControllerState controller_state{};
+        if (!generic_hid_decode_input_report(data + 1, static_cast<uint16_t>(len - 1), controller_state)) {
+            return;
+        }
+
+        critical_section_enter_blocking(&report_cs);
+        interrupt_in_state = controller_state;
+        report_dirty = true;
+        bridge_latency_note_report(time_us_32());
+        critical_section_exit(&report_cs);
+        return;
+    }
+
     if (data == nullptr || channel != INTERRUPT || len <= 2 || data[1] != 0x31) {
+#if DS5_DEBUG_LOGS_ENABLED
+        if (data != nullptr && len > 1) {
+            log_unrecognized_bt_report(channel, data, len);
+        }
+#endif
         return;
     }
 

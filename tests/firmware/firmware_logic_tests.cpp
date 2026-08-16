@@ -16,6 +16,8 @@
 #include "controller_packet_compositor.h"
 #include "dualsense_input_decoder.h"
 #include "dualsense_output.h"
+#include "generic_hid_input_decoder.h"
+#include "hid_report_descriptor.h"
 #include "haptics_test_signal.h"
 #include "kitsune_button_gesture.h"
 #include "output_scheduler.h"
@@ -1533,12 +1535,548 @@ void radial_deadzone_preserves_direction_and_rescales_remaining_travel() {
     EXPECT_TRUE(diagonal.x < 192);
 }
 
+// A typical generic Bluetooth gamepad: report ID 1, four 8-bit axes, sixteen
+// buttons, a hat nibble, and a nibble of padding.
+std::vector<uint8_t> generic_gamepad_report_descriptor() {
+    return {
+        0x05, 0x01,       // Usage Page (Generic Desktop)
+        0x09, 0x05,       // Usage (Game Pad)
+        0xA1, 0x01,       // Collection (Application)
+        0x85, 0x01,       //   Report ID (1)
+        0x09, 0x01,       //   Usage (Pointer)
+        0xA1, 0x00,       //   Collection (Physical)
+        0x09, 0x30,       //     Usage (X)
+        0x09, 0x31,       //     Usage (Y)
+        0x09, 0x32,       //     Usage (Z)
+        0x09, 0x35,       //     Usage (Rz)
+        0x15, 0x00,       //     Logical Minimum (0)
+        0x26, 0xFF, 0x00, //     Logical Maximum (255)
+        0x75, 0x08,       //     Report Size (8)
+        0x95, 0x04,       //     Report Count (4)
+        0x81, 0x02,       //     Input (Data,Var,Abs)
+        0xC0,             //   End Collection
+        0x05, 0x09,       //   Usage Page (Button)
+        0x19, 0x01,       //   Usage Minimum (Button 1)
+        0x29, 0x10,       //   Usage Maximum (Button 16)
+        0x15, 0x00,       //   Logical Minimum (0)
+        0x25, 0x01,       //   Logical Maximum (1)
+        0x75, 0x01,       //   Report Size (1)
+        0x95, 0x10,       //   Report Count (16)
+        0x81, 0x02,       //   Input (Data,Var,Abs)
+        0x05, 0x01,       //   Usage Page (Generic Desktop)
+        0x09, 0x39,       //   Usage (Hat switch)
+        0x15, 0x00,       //   Logical Minimum (0)
+        0x25, 0x07,       //   Logical Maximum (7)
+        0x35, 0x00,       //   Physical Minimum (0)
+        0x46, 0x3B, 0x01, //   Physical Maximum (315)
+        0x65, 0x14,       //   Unit (Degrees)
+        0x75, 0x04,       //   Report Size (4)
+        0x95, 0x01,       //   Report Count (1)
+        0x81, 0x42,       //   Input (Data,Var,Abs,Null State)
+        0x75, 0x04,       //   Report Size (4)
+        0x95, 0x01,       //   Report Count (1)
+        0x81, 0x03,       //   Input (Const,Var,Abs) -- padding
+        0xC0,             // End Collection
+    };
+}
+
+void hid_descriptor_parser_locates_axes_buttons_and_hat() {
+    const auto descriptor = generic_gamepad_report_descriptor();
+    HidGamepadLayout layout{};
+
+    EXPECT_TRUE(hid_report_descriptor_parse_buffer(
+        descriptor.data(), static_cast<uint16_t>(descriptor.size()), layout));
+
+    EXPECT_TRUE(layout.valid);
+    EXPECT_TRUE(layout.uses_report_id);
+    EXPECT_EQ(layout.report_id, 1);
+    EXPECT_EQ(layout.report_bits, 56);
+
+    EXPECT_TRUE(layout.x.present);
+    EXPECT_EQ(layout.x.bit_offset, 0);
+    EXPECT_EQ(layout.x.bit_size, 8);
+    EXPECT_EQ(layout.x.logical_min, 0);
+    EXPECT_EQ(layout.x.logical_max, 255);
+
+    EXPECT_TRUE(layout.y.present);
+    EXPECT_EQ(layout.y.bit_offset, 8);
+    EXPECT_TRUE(layout.z.present);
+    EXPECT_EQ(layout.z.bit_offset, 16);
+    EXPECT_TRUE(layout.rz.present);
+    EXPECT_EQ(layout.rz.bit_offset, 24);
+
+    // Rotation axes are absent here, which is what pushes the decoder onto
+    // digital triggers.
+    EXPECT_FALSE(layout.rx.present);
+    EXPECT_FALSE(layout.ry.present);
+
+    EXPECT_TRUE(layout.buttons_present);
+    EXPECT_EQ(layout.button_bit_offset, 32);
+    EXPECT_EQ(layout.button_count, 16);
+
+    EXPECT_TRUE(layout.hat.present);
+    EXPECT_EQ(layout.hat.bit_offset, 48);
+    EXPECT_EQ(layout.hat.bit_size, 4);
+    EXPECT_EQ(layout.hat.logical_max, 7);
+}
+
+void generic_hid_decoder_maps_descriptor_layout_to_bridge_state() {
+    const auto descriptor = generic_gamepad_report_descriptor();
+    HidGamepadLayout layout{};
+    EXPECT_TRUE(hid_report_descriptor_parse_buffer(
+        descriptor.data(), static_cast<uint16_t>(descriptor.size()), layout));
+
+    generic_hid_reset();
+    EXPECT_TRUE(generic_hid_apply_descriptor_layout(layout));
+    EXPECT_TRUE(generic_hid_layout_is_from_descriptor());
+
+    // Report ID, X, Y, Z, Rz, buttons 1-8, buttons 9-16, hat.
+    const std::array<uint8_t, 8> report{
+        0x01,
+        0xFF, // X full right
+        0x00, // Y full up
+        0x80, // Z centred
+        0x40, // Rz
+        0x41, // Button 1 (A) and button 7 (L1)
+        0x08, // Button 12 (Start)
+        0x02, // Hat east
+    };
+
+    BridgeControllerState state{};
+    EXPECT_TRUE(generic_hid_decode_input_report(
+        report.data(), static_cast<uint16_t>(report.size()), state));
+
+    EXPECT_EQ(state.left_stick_x, 255);
+    EXPECT_EQ(state.left_stick_y, 0);
+    EXPECT_EQ(state.right_stick_x, 128);
+    EXPECT_EQ(state.right_stick_y, 64);
+
+    EXPECT_TRUE(state.cross);
+    EXPECT_TRUE(state.l1);
+    EXPECT_TRUE(state.options);
+    EXPECT_FALSE(state.circle);
+    EXPECT_FALSE(state.square);
+    EXPECT_FALSE(state.triangle);
+    EXPECT_FALSE(state.r1);
+    EXPECT_FALSE(state.home);
+
+    EXPECT_TRUE(state.dpad_right);
+    EXPECT_FALSE(state.dpad_up);
+    EXPECT_FALSE(state.dpad_down);
+    EXPECT_FALSE(state.dpad_left);
+
+    // No analog trigger axes in this descriptor, so triggers follow the digital
+    // shoulder buttons, which are released here.
+    EXPECT_EQ(state.left_trigger, 0);
+    EXPECT_EQ(state.right_trigger, 0);
+
+    // A report ID the layout does not describe must be ignored rather than
+    // decoded as if it matched.
+    const std::array<uint8_t, 8> other_report{0x02, 0, 0, 0, 0, 0, 0, 0};
+    BridgeControllerState untouched{};
+    EXPECT_FALSE(generic_hid_decode_input_report(
+        other_report.data(), static_cast<uint16_t>(other_report.size()), untouched));
+
+    generic_hid_reset();
+}
+
+void generic_hid_decoder_derives_triggers_from_digital_shoulders() {
+    const auto descriptor = generic_gamepad_report_descriptor();
+    HidGamepadLayout layout{};
+    EXPECT_TRUE(hid_report_descriptor_parse_buffer(
+        descriptor.data(), static_cast<uint16_t>(descriptor.size()), layout));
+
+    generic_hid_reset();
+    EXPECT_TRUE(generic_hid_apply_descriptor_layout(layout));
+
+    // Buttons 9 and 10 are L2 and R2 in the default mapping.
+    const std::array<uint8_t, 8> report{0x01, 0x80, 0x80, 0x80, 0x80, 0x00, 0x03, 0x0F};
+
+    BridgeControllerState state{};
+    EXPECT_TRUE(generic_hid_decode_input_report(
+        report.data(), static_cast<uint16_t>(report.size()), state));
+
+    EXPECT_TRUE(state.l2_pressed);
+    EXPECT_TRUE(state.r2_pressed);
+    EXPECT_EQ(state.left_trigger, 255);
+    EXPECT_EQ(state.right_trigger, 255);
+
+    // Hat value 0x0F is outside the 0..7 logical range: the null state, so the
+    // D-pad must read centred rather than picking a direction.
+    EXPECT_FALSE(state.dpad_up);
+    EXPECT_FALSE(state.dpad_down);
+    EXPECT_FALSE(state.dpad_left);
+    EXPECT_FALSE(state.dpad_right);
+
+    generic_hid_reset();
+}
+
+void hid_descriptor_parser_handles_signed_sixteen_bit_axes() {
+    // A joystick-style descriptor: no report ID, signed 16-bit axes, four
+    // buttons.
+    const std::vector<uint8_t> descriptor{
+        0x05, 0x01,       // Usage Page (Generic Desktop)
+        0x09, 0x04,       // Usage (Joystick)
+        0xA1, 0x01,       // Collection (Application)
+        0x09, 0x30,       //   Usage (X)
+        0x09, 0x31,       //   Usage (Y)
+        0x16, 0x00, 0x80, //   Logical Minimum (-32768)
+        0x26, 0xFF, 0x7F, //   Logical Maximum (32767)
+        0x75, 0x10,       //   Report Size (16)
+        0x95, 0x02,       //   Report Count (2)
+        0x81, 0x02,       //   Input (Data,Var,Abs)
+        0x05, 0x09,       //   Usage Page (Button)
+        0x19, 0x01,       //   Usage Minimum (Button 1)
+        0x29, 0x04,       //   Usage Maximum (Button 4)
+        0x15, 0x00,       //   Logical Minimum (0)
+        0x25, 0x01,       //   Logical Maximum (1)
+        0x75, 0x01,       //   Report Size (1)
+        0x95, 0x04,       //   Report Count (4)
+        0x81, 0x02,       //   Input (Data,Var,Abs)
+        0x75, 0x04,       //   Report Size (4)
+        0x95, 0x01,       //   Report Count (1)
+        0x81, 0x03,       //   Input (Const,Var,Abs)
+        0xC0,             // End Collection
+    };
+
+    HidGamepadLayout layout{};
+    EXPECT_TRUE(hid_report_descriptor_parse_buffer(
+        descriptor.data(), static_cast<uint16_t>(descriptor.size()), layout));
+
+    EXPECT_FALSE(layout.uses_report_id);
+    EXPECT_EQ(layout.x.bit_size, 16);
+    EXPECT_EQ(layout.x.logical_min, -32768);
+    EXPECT_EQ(layout.x.logical_max, 32767);
+    EXPECT_EQ(layout.y.bit_offset, 16);
+    EXPECT_EQ(layout.button_bit_offset, 32);
+    EXPECT_EQ(layout.button_count, 4);
+    EXPECT_EQ(layout.report_bits, 40);
+
+    generic_hid_reset();
+    EXPECT_TRUE(generic_hid_apply_descriptor_layout(layout));
+
+    // X at the negative extreme, Y at the positive extreme.
+    const std::array<uint8_t, 5> report{0x00, 0x80, 0xFF, 0x7F, 0x01};
+    BridgeControllerState state{};
+    EXPECT_TRUE(generic_hid_decode_input_report(
+        report.data(), static_cast<uint16_t>(report.size()), state));
+
+    EXPECT_EQ(state.left_stick_x, 0);
+    EXPECT_EQ(state.left_stick_y, 255);
+    EXPECT_TRUE(state.cross);
+
+    generic_hid_reset();
+}
+
+void hid_descriptor_parser_rejects_input_that_is_not_a_gamepad() {
+    HidGamepadLayout layout{};
+    EXPECT_FALSE(hid_report_descriptor_parse_buffer(nullptr, 0, layout));
+    EXPECT_FALSE(layout.valid);
+
+    // Truncated mid-item: must terminate rather than run off the end.
+    const std::vector<uint8_t> truncated{0x05, 0x01, 0x09, 0x05, 0xA1, 0x01, 0x26};
+    EXPECT_FALSE(hid_report_descriptor_parse_buffer(
+        truncated.data(), static_cast<uint16_t>(truncated.size()), layout));
+
+    // A keyboard descriptor declares buttons on no page we map and no axes.
+    const std::vector<uint8_t> keyboard{
+        0x05, 0x01,       // Usage Page (Generic Desktop)
+        0x09, 0x06,       // Usage (Keyboard)
+        0xA1, 0x01,       // Collection (Application)
+        0x05, 0x07,       //   Usage Page (Keyboard)
+        0x19, 0xE0,       //   Usage Minimum
+        0x29, 0xE7,       //   Usage Maximum
+        0x75, 0x01,       //   Report Size (1)
+        0x95, 0x08,       //   Report Count (8)
+        0x81, 0x02,       //   Input
+        0xC0,             // End Collection
+    };
+    EXPECT_FALSE(hid_report_descriptor_parse_buffer(
+        keyboard.data(), static_cast<uint16_t>(keyboard.size()), layout));
+}
+
+void generic_hid_decoder_falls_back_when_no_descriptor_arrives() {
+    generic_hid_reset();
+
+    // No descriptor applied: the built-in layout stands in so the pad is not
+    // completely dead, and the dump reports it as a guess.
+    EXPECT_FALSE(generic_hid_layout_is_from_descriptor());
+    EXPECT_TRUE(generic_hid_active_layout().valid);
+
+    HidGamepadLayout invalid{};
+    EXPECT_FALSE(generic_hid_apply_descriptor_layout(invalid));
+    EXPECT_FALSE(generic_hid_layout_is_from_descriptor());
+
+    // Captured from a Cosmic Byte Stellaris: report ID 0x07, left stick held
+    // up and to the left, right stick centred, hat null, no buttons.
+    const std::array<uint8_t, 11> report{
+        0x07, 0x5B, 0x05, 0x80, 0x80, 0x0F, 0x00, 0x00, 0x00, 0x00, 0x00};
+
+    BridgeControllerState state{};
+    EXPECT_TRUE(generic_hid_decode_input_report(
+        report.data(), static_cast<uint16_t>(report.size()), state));
+
+    // The report ID is not knowable without a descriptor, so it is adopted from
+    // the first report rather than guessed. Guessing it wrong rejects every
+    // report, which presents as a connected-but-dead controller.
+    EXPECT_EQ(generic_hid_active_layout().report_id, 0x07);
+
+    EXPECT_EQ(state.left_stick_x, 0x5B);
+    EXPECT_EQ(state.left_stick_y, 0x05);
+    EXPECT_EQ(state.right_stick_x, 0x80);
+    EXPECT_EQ(state.right_stick_y, 0x80);
+
+    // 0x0F is outside the hat's 0..7 range: centred.
+    EXPECT_FALSE(state.dpad_up);
+    EXPECT_FALSE(state.dpad_left);
+    EXPECT_FALSE(state.cross);
+
+    // Whatever arrived is retained for the diagnostic dump, including the
+    // report ID byte.
+    std::array<uint8_t, 16> captured{};
+    EXPECT_EQ(generic_hid_last_report(captured.data(), static_cast<uint16_t>(captured.size())), 11);
+    EXPECT_EQ(captured[0], 0x07);
+    EXPECT_EQ(captured[1], 0x5B);
+
+    // Second capture from the same pad, sticks centred with buttons held.
+    const std::array<uint8_t, 11> pressed{
+        0x07, 0x80, 0x80, 0x80, 0x80, 0x0F, 0x09, 0x00, 0x00, 0x00, 0x00};
+    BridgeControllerState pressed_state{};
+    EXPECT_TRUE(generic_hid_decode_input_report(
+        pressed.data(), static_cast<uint16_t>(pressed.size()), pressed_state));
+    EXPECT_EQ(pressed_state.left_stick_x, 0x80);
+    EXPECT_TRUE(pressed_state.cross);   // button 1
+    EXPECT_TRUE(pressed_state.square);  // button 4
+
+    generic_hid_reset();
+}
+
+// Every report below was captured from a Cosmic Byte Stellaris in Android mode.
+void generic_hid_decoder_matches_captured_stellaris_controls() {
+    generic_hid_reset();
+
+    struct Capture {
+        char const *what;
+        std::array<uint8_t, 11> report;
+    };
+
+    // Face buttons and shoulders, one at a time.
+    const Capture buttons[] = {
+        {"A", {0x07, 0x80, 0x80, 0x80, 0x80, 0x0F, 0x01, 0x00, 0x00, 0x00, 0x00}},
+        {"B", {0x07, 0x80, 0x80, 0x80, 0x80, 0x0F, 0x02, 0x00, 0x00, 0x00, 0x00}},
+        {"X", {0x07, 0x80, 0x80, 0x80, 0x80, 0x0F, 0x08, 0x00, 0x00, 0x00, 0x00}},
+        {"Y", {0x07, 0x80, 0x80, 0x80, 0x80, 0x0F, 0x10, 0x00, 0x00, 0x00, 0x00}},
+        {"L1", {0x07, 0x80, 0x80, 0x80, 0x80, 0x0F, 0x40, 0x00, 0x00, 0x00, 0x00}},
+        {"R1", {0x07, 0x80, 0x80, 0x80, 0x80, 0x0F, 0x80, 0x00, 0x00, 0x00, 0x00}},
+    };
+
+    BridgeControllerState s{};
+    EXPECT_TRUE(generic_hid_decode_input_report(buttons[0].report.data(), 11, s));
+    EXPECT_TRUE(s.cross);
+    EXPECT_FALSE(s.circle);
+
+    EXPECT_TRUE(generic_hid_decode_input_report(buttons[1].report.data(), 11, s));
+    EXPECT_TRUE(s.circle);
+    EXPECT_FALSE(s.cross);
+
+    EXPECT_TRUE(generic_hid_decode_input_report(buttons[2].report.data(), 11, s));
+    EXPECT_TRUE(s.square);
+
+    EXPECT_TRUE(generic_hid_decode_input_report(buttons[3].report.data(), 11, s));
+    EXPECT_TRUE(s.triangle);
+
+    EXPECT_TRUE(generic_hid_decode_input_report(buttons[4].report.data(), 11, s));
+    EXPECT_TRUE(s.l1);
+    EXPECT_FALSE(s.r1);
+
+    EXPECT_TRUE(generic_hid_decode_input_report(buttons[5].report.data(), 11, s));
+    EXPECT_TRUE(s.r1);
+    EXPECT_FALSE(s.l1);
+
+    // L2: button 9 plus a full-scale analog value at byte 9.
+    const std::array<uint8_t, 11> l2{
+        0x07, 0x80, 0x80, 0x80, 0x80, 0x0F, 0x00, 0x01, 0x00, 0xFF, 0x00};
+    EXPECT_TRUE(generic_hid_decode_input_report(l2.data(), 11, s));
+    EXPECT_TRUE(s.l2_pressed);
+    EXPECT_EQ(s.left_trigger, 255);
+    EXPECT_EQ(s.right_trigger, 0);
+
+    // R2: button 10 plus its analog value at byte 8 -- the reverse order to the
+    // buttons, which is what the capture showed.
+    const std::array<uint8_t, 11> r2{
+        0x07, 0x80, 0x80, 0x80, 0x80, 0x0F, 0x00, 0x02, 0xFF, 0x00, 0x00};
+    EXPECT_TRUE(generic_hid_decode_input_report(r2.data(), 11, s));
+    EXPECT_TRUE(s.r2_pressed);
+    EXPECT_EQ(s.right_trigger, 255);
+    EXPECT_EQ(s.left_trigger, 0);
+
+    // R3 (button 15).
+    const std::array<uint8_t, 11> r3{
+        0x07, 0x80, 0x80, 0x80, 0x80, 0x0F, 0x00, 0x40, 0x00, 0x00, 0x00};
+    EXPECT_TRUE(generic_hid_decode_input_report(r3.data(), 11, s));
+    EXPECT_TRUE(s.r3);
+    EXPECT_FALSE(s.l3);
+
+    // Left stick pushed right and down.
+    const std::array<uint8_t, 11> left_stick{
+        0x07, 0xB2, 0x8E, 0x80, 0x80, 0x0F, 0x00, 0x00, 0x00, 0x00, 0x00};
+    EXPECT_TRUE(generic_hid_decode_input_report(left_stick.data(), 11, s));
+    EXPECT_EQ(s.left_stick_x, 0xB2);
+    EXPECT_EQ(s.left_stick_y, 0x8E);
+    EXPECT_EQ(s.right_stick_x, 0x80);
+
+    // Right stick pushed hard left.
+    const std::array<uint8_t, 11> right_stick{
+        0x07, 0x80, 0x80, 0x10, 0x7F, 0x0F, 0x00, 0x00, 0x00, 0x00, 0x00};
+    EXPECT_TRUE(generic_hid_decode_input_report(right_stick.data(), 11, s));
+    EXPECT_EQ(s.right_stick_x, 0x10);
+    EXPECT_EQ(s.left_stick_x, 0x80);
+
+    generic_hid_reset();
+}
+
+// Windows pairing mode uses a completely different report: a different ID, one
+// more byte, buttons first, and 16-bit little-endian axes centred on 0x8000.
+void generic_hid_decoder_selects_windows_mode_layout() {
+    generic_hid_reset();
+
+    // Neutral report captured in Windows mode: sticks centred, hat null.
+    const std::array<uint8_t, 12> neutral{
+        0x3F, 0x00, 0x00, 0x0F, 0x00, 0x80, 0x00, 0x80, 0x00, 0x80, 0x00, 0x80};
+
+    BridgeControllerState state{};
+    EXPECT_TRUE(generic_hid_decode_input_report(
+        neutral.data(), static_cast<uint16_t>(neutral.size()), state));
+
+    EXPECT_TRUE(generic_hid_layout_source() == HidLayoutSource::Known);
+    EXPECT_EQ(generic_hid_active_layout().report_id, 0x3F);
+    EXPECT_EQ(generic_hid_active_layout().x.bit_size, 16);
+
+    // 0x8000 out of 0..65535 rounds to exactly centre.
+    EXPECT_EQ(state.left_stick_x, 128);
+    EXPECT_EQ(state.left_stick_y, 128);
+    EXPECT_EQ(state.right_stick_x, 128);
+    EXPECT_EQ(state.right_stick_y, 128);
+    EXPECT_FALSE(state.dpad_up);
+    EXPECT_FALSE(state.cross);
+
+    // Full deflection on the left stick X only.
+    const std::array<uint8_t, 12> deflected{
+        0x3F, 0x00, 0x00, 0x0F, 0xFF, 0xFF, 0x00, 0x80, 0x00, 0x80, 0x00, 0x80};
+    EXPECT_TRUE(generic_hid_decode_input_report(
+        deflected.data(), static_cast<uint16_t>(deflected.size()), state));
+    EXPECT_EQ(state.left_stick_x, 255);
+    EXPECT_EQ(state.left_stick_y, 128);
+
+    // Every button below was captured one at a time in Windows mode. The
+    // numbering is dense DirectInput -- buttons 3 and 6 are in use, where the
+    // pad's Android mode leaves them empty -- so the two modes need separate
+    // button maps even though it is the same physical pad.
+    auto press = [&](uint8_t b1, uint8_t b2) -> BridgeControllerState {
+        const std::array<uint8_t, 12> r{
+            0x3F, b1, b2, 0x0F, 0x00, 0x80, 0x00, 0x80, 0x00, 0x80, 0x00, 0x80};
+        BridgeControllerState out{};
+        EXPECT_TRUE(generic_hid_decode_input_report(r.data(), 12, out));
+        return out;
+    };
+
+    EXPECT_TRUE(press(0x01, 0x00).cross);      // button 1  = A
+    EXPECT_TRUE(press(0x02, 0x00).circle);     // button 2  = B
+    EXPECT_TRUE(press(0x04, 0x00).square);     // button 3  = X
+    EXPECT_TRUE(press(0x08, 0x00).triangle);   // button 4  = Y
+    EXPECT_TRUE(press(0x10, 0x00).l1);         // button 5
+    EXPECT_TRUE(press(0x20, 0x00).r1);         // button 6
+    EXPECT_TRUE(press(0x40, 0x00).l2_pressed); // button 7
+    EXPECT_TRUE(press(0x80, 0x00).r2_pressed); // button 8
+    EXPECT_TRUE(press(0x00, 0x01).create);     // button 9  = Select
+    EXPECT_TRUE(press(0x00, 0x02).options);    // button 10 = Start
+    EXPECT_TRUE(press(0x00, 0x04).l3);         // button 11
+    EXPECT_TRUE(press(0x00, 0x08).r3);         // button 12
+    EXPECT_TRUE(press(0x00, 0x10).home);       // button 13 = Guide
+
+    // Buttons 7 and 8 are the triggers, and this mode reports them as buttons
+    // only, so full deflection has to be synthesised.
+    EXPECT_EQ(press(0x40, 0x00).left_trigger, 255);
+    EXPECT_EQ(press(0x80, 0x00).right_trigger, 255);
+    EXPECT_EQ(press(0x00, 0x00).left_trigger, 0);
+
+    // Captured hat values: 0 north, 2 east, 4 south, 6 west, 0x0F centred.
+    auto hat = [&](uint8_t value) -> BridgeControllerState {
+        const std::array<uint8_t, 12> r{
+            0x3F, 0x00, 0x00, value, 0x00, 0x80, 0x00, 0x80, 0x00, 0x80, 0x00, 0x80};
+        BridgeControllerState out{};
+        EXPECT_TRUE(generic_hid_decode_input_report(r.data(), 12, out));
+        return out;
+    };
+    EXPECT_TRUE(hat(0).dpad_up);
+    EXPECT_TRUE(hat(2).dpad_right);
+    EXPECT_TRUE(hat(4).dpad_down);
+    EXPECT_TRUE(hat(6).dpad_left);
+    EXPECT_FALSE(hat(0x0F).dpad_up);
+    EXPECT_FALSE(hat(0x0F).dpad_left);
+
+    generic_hid_reset();
+}
+
+// The two modes must not be confused for one another: same pad, same firmware,
+// different wire format.
+void generic_hid_decoder_keeps_android_and_windows_layouts_distinct() {
+    generic_hid_reset();
+    const std::array<uint8_t, 11> android{
+        0x07, 0x80, 0x80, 0x80, 0x80, 0x0F, 0x00, 0x00, 0x00, 0x00, 0x00};
+    BridgeControllerState state{};
+    EXPECT_TRUE(generic_hid_decode_input_report(android.data(), 11, state));
+    EXPECT_TRUE(generic_hid_layout_source() == HidLayoutSource::Known);
+    EXPECT_EQ(generic_hid_active_layout().x.bit_size, 8);
+    EXPECT_TRUE(generic_hid_active_layout().rx.present); // analog triggers
+
+    generic_hid_reset();
+    const std::array<uint8_t, 12> windows{
+        0x3F, 0x00, 0x00, 0x0F, 0x00, 0x80, 0x00, 0x80, 0x00, 0x80, 0x00, 0x80};
+    EXPECT_TRUE(generic_hid_decode_input_report(windows.data(), 12, state));
+    EXPECT_EQ(generic_hid_active_layout().x.bit_size, 16);
+    EXPECT_FALSE(generic_hid_active_layout().rx.present); // digital triggers
+
+    generic_hid_reset();
+}
+
+void generic_hid_decoder_ignores_short_reports_when_adopting_report_id() {
+    generic_hid_reset();
+
+    // A short report -- a battery or consumer-control frame interleaved with
+    // the gamepad ones -- must not become the adopted report ID, or the real
+    // gamepad reports get rejected forever.
+    const std::array<uint8_t, 3> short_report{0x02, 0x00, 0x00};
+    BridgeControllerState state{};
+    generic_hid_decode_input_report(
+        short_report.data(), static_cast<uint16_t>(short_report.size()), state);
+    EXPECT_TRUE(generic_hid_active_layout().report_id != 0x02);
+
+    const std::array<uint8_t, 11> gamepad{
+        0x07, 0x80, 0x80, 0x80, 0x80, 0x0F, 0x00, 0x00, 0x00, 0x00, 0x00};
+    EXPECT_TRUE(generic_hid_decode_input_report(
+        gamepad.data(), static_cast<uint16_t>(gamepad.size()), state));
+    EXPECT_EQ(generic_hid_active_layout().report_id, 0x07);
+
+    generic_hid_reset();
+}
+
 struct TestCase {
     char const *name;
     void (*run)();
 };
 
 std::vector<TestCase> tests{
+    {"hid descriptor parser locates axes buttons and hat", hid_descriptor_parser_locates_axes_buttons_and_hat},
+    {"generic hid decoder maps descriptor layout to bridge state", generic_hid_decoder_maps_descriptor_layout_to_bridge_state},
+    {"generic hid decoder derives triggers from digital shoulders", generic_hid_decoder_derives_triggers_from_digital_shoulders},
+    {"hid descriptor parser handles signed sixteen bit axes", hid_descriptor_parser_handles_signed_sixteen_bit_axes},
+    {"hid descriptor parser rejects input that is not a gamepad", hid_descriptor_parser_rejects_input_that_is_not_a_gamepad},
+    {"generic hid decoder falls back when no descriptor arrives", generic_hid_decoder_falls_back_when_no_descriptor_arrives},
+    {"generic hid decoder matches captured stellaris controls", generic_hid_decoder_matches_captured_stellaris_controls},
+    {"generic hid decoder selects windows mode layout", generic_hid_decoder_selects_windows_mode_layout},
+    {"generic hid decoder keeps android and windows layouts distinct", generic_hid_decoder_keeps_android_and_windows_layouts_distinct},
+    {"generic hid decoder ignores short reports when adopting report id", generic_hid_decoder_ignores_short_reports_when_adopting_report_id},
     {"scheduler prioritizes due audio over old state", scheduler_prioritizes_due_audio_over_old_state},
     {"scheduler sends coalesced state when audio is absent", scheduler_sends_coalesced_state_when_audio_is_absent},
     {"scheduler due audio stays ahead of coalesced state", scheduler_due_audio_stays_ahead_of_coalesced_state},

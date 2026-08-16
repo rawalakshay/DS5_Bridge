@@ -6,7 +6,15 @@
 
 namespace {
 
+// The Stellaris image is Xbox-only. Setting the default here rather than
+// re-enumerating later matters: this is read by tud_descriptor_device_cb and
+// tud_descriptor_configuration_cb at enumeration time, which happens before any
+// runtime code could swap it.
+#if STELLARIS_ONLY
+HostPersonaMode active_persona = HostPersonaModeXusb360;
+#else
 HostPersonaMode active_persona = HostPersonaModeDualSense;
+#endif
 
 } // namespace
 
@@ -24,10 +32,12 @@ extern "C" bool host_persona_set_active(HostPersonaMode mode) {
 
 extern "C" bool host_persona_is_supported(HostPersonaMode mode) {
     switch (mode) {
+#if !STELLARIS_ONLY
         case HostPersonaModeDualSense:
         case HostPersonaModeDualSenseEdge:
-        case HostPersonaModeXusb360:
         case HostPersonaModeDs4:
+#endif
+        case HostPersonaModeXusb360:
             return host_persona_descriptors_verified(mode);
         default:
             return false;

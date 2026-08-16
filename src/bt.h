@@ -18,6 +18,10 @@ enum ControllerType : uint8_t {
     ControllerTypeUnknown = 0,
     ControllerTypeDualSense = 1,
     ControllerTypeDualSenseEdge = 2,
+    // Any third-party Bluetooth HID gamepad. Reached only in Stellaris mode,
+    // where the DualSense feature probe is skipped entirely, so it can never be
+    // confused with the 0x02-handshake fallback that classifies a DualSense.
+    ControllerTypeGenericHid = 3,
 };
 
 enum BtControllerDisconnectIntent : uint8_t {
@@ -50,6 +54,23 @@ bool bt_disconnect();
 bool bt_disconnect_with_intent(BtControllerDisconnectIntent intent);
 bool bt_expected_disconnect_pending();
 bool bt_power_off_controller();
+// Sends one raw HID output report to a generic pad, bypassing the DualSense
+// framing entirely (no sequence nibble, no CRC32, no output queue). Only used
+// by the Stellaris rumble probe, which has to try candidate formats the
+// DualSense pipeline would corrupt.
+//
+// Returns 0 on success. A caller probing formats must distinguish "sent and
+// ignored" from "never left the radio", so the failure reasons are explicit.
+constexpr uint8_t kBtRawOutputSent = 0;
+constexpr uint8_t kBtRawOutputBusy = 0xFD;        // Channel not ready; retry.
+constexpr uint8_t kBtRawOutputUnavailable = 0xFE; // No generic pad connected.
+uint8_t bt_send_raw_hid_output(uint8_t const *data, uint16_t len);
+
+// Drives a generic pad's motors using the output report 0x10 format, which is
+// the one a Cosmic Byte Stellaris responds to. Rate-limited internally and a
+// no-op outside Stellaris mode. Intensity is currently on/off: only the
+// zero/non-zero distinction is honoured.
+void bt_stellaris_set_rumble(uint8_t left, uint8_t right);
 bool bt_request_scan();
 bool bt_forget_pairings();
 bool bt_forget_pairing(uint8_t address[6]);

@@ -26,6 +26,8 @@ cmake --build build/companion --target ds5-bridge   # -> build/companion/ds5-bri
 ```
 
 - `-DENABLE_COMPANION=ON` is required for the companion app to see the bridge; it is **OFF** by default.
+- `-DSTELLARIS_ONLY=ON` builds the Stellaris/Xbox variant (see below). Same source list, behaviour gate only. Requires `ENABLE_COMPANION=ON` — configure fails loudly otherwise.
+- The repo-root `Makefile` wraps both: `make pico-build` (DualSense) and `make stellaris-build`, dropping timestamped images into `uf2_builds/`.
 - Waveshare board: add `-DWAVESHARE_RP2350B_PLUS_W_BUILD=ON`, or run `boards/build_waveshare_rp2350b_plus_w.sh`.
 - Toolchain must match CI: Pico SDK `2.3.0`, TinyUSB `2d56dc533e45e4e91b15e93fdab5e22e964f328d`, Arm GNU `15.2.Rel1`. The Ubuntu apt `gcc-arm-none-eabi` 13.2 produces audible audio static on Waveshare builds — use ARM's official tarball.
 - Diagnostics are compile-time: `-DDS5_DIAGNOSTICS_PRESET=off|audio|traces|all|custom`. Presets are authoritative and override stale cached legacy flags. UART logging preset: `cmake --preset pico2-w-debug-uart-companion-on`. See `docs/diagnostics.md`.
@@ -78,6 +80,15 @@ Controller → host: `bt.cpp` (inquiry, pairing, L2CAP HID) → `dualsense_input
 
 `src/persona/` is the host-facing identity layer (`HostPersonaMode`: DualSense, DualSense Edge, DS4, Xbox 360/XUSB). Switching persona changes the USB configuration descriptor and re-enumerates; `host_input_prepare_persona_switch()` quiets input across the swap. XUSB is not native HID and has its own USB driver path (`xusb360_usb.cpp`, `usb_app_drivers.cpp`).
 
+### Stellaris-only variant (`STELLARIS_ONLY`)
+
+A second image that connects to a generic Bluetooth HID gamepad instead of a DualSense and always presents as an Xbox 360 pad. It is a **compile-time behaviour gate over the same source list** — never a source-list change, because `cmake/relocate_to_ram.cmake` and `cmake/verify_core1_sram.cmake` both hard-fail on missing objects and symbols.
+
+- `bridge_mode_is_stellaris()` (`src/bridge_mode.h`) is `constexpr` in **both** directions. It is checked inside SRAM-relocated functions (`on_bt_data`, `bt_write_audio_stream`, the output enqueue funnels) that can run while core 1 has XIP paused; a runtime read of flash-resident state there would fault. It also leaves the DualSense image's codegen untouched.
+- Input: `src/hid_report_descriptor.cpp` parses a pad's HID report descriptor (fetched over SDP); `src/generic_hid_input_decoder.cpp` maps it onto the 21 fields XUSB reads. A table of layouts verified against hardware is matched on **report ID + report length** — the same pad uses different report shapes *and different button numbering* per pairing mode, so button maps travel with the layout.
+- Output is cut at the four `enqueue_*` funnels in `bt.cpp`, plus `bt_power_off_controller` (direct `l2cap_send`) and `audio_loop`. Rumble is the one exception: `bt_stellaris_set_rumble()` sends a raw HID output report via `bt_send_raw_hid_output()`, bypassing the DualSense sequence-nibble and CRC framing.
+- `src/stellaris_diagnostics.cpp` types diagnostics through the companion keyboard HID interface (BOOTSEL double-press cycles: guided capture → rumble probe → stop). It exists because this image has no other readout — the companion app shows a DualSense-shaped view that means nothing here.
+
 `companion.cpp` implements the vendor HID companion interface (report IDs in `companion.h`) — status/input/audio-status telemetry out, commands + ACKs in, and it owns runtime settings dispatch. `host_bridge.cpp` is the separate vendor interface used by the WinUSB path — a bulk OUT endpoint plus vendor control requests (`0x31`/`0x32`) carrying both companion commands and streamed host audio (report `0x07`).
 
 ### Companion app processes
@@ -97,6 +108,7 @@ Controller → host: `bt.cpp` (inquiry, pairing, L2CAP HID) → `dualsense_input
 - **USB descriptors**: any change to `src/usb_descriptors.c` fails the migration guard. If intentional, bump `bcdDevice` so Windows re-enumerates cleanly, then update `kExpectedUsbDeviceRevision` and `kExpectedCompanionDescriptorHash`. VID/PID, string descriptors, interface order/count, and audio topology are Windows PnP identity — stale test identities need `tools/windows/clean-ds5bridge-devices.ps1`.
 - **Firmware version has one canonical source**: `firmware-version.txt`. `CMakeLists.txt`, `src/companion.cpp`, `BUNDLED_FIRMWARE_VERSION` in `bridge-service.ts`, `tools/create-release-candidate.ps1`, and `.github/workflows/release.yml` must all agree; the guard enforces it.
 - **Protocol versioning**: `kProtocolMajor`/`kProtocolMinor`/`kProtocolMinSupportedMinor` in `companion.cpp` and `PROTOCOL_MAJOR`/`PROTOCOL_MINOR` in `protocol.ts`. Firmware accepts the same major within `[minSupportedMinor, minor]`, and reads newer fields conditionally (`protocol_minor >= N`). Adding a command means bumping the minor on both sides and gating the new payload bytes — never repurpose existing offsets.
+- **`verify_core1_sram.cmake` has a per-variant symbol list.** The two images link different halves of the input hot path, so ~10 symbols (the companion report rewriter, the DualSense/DS4 personas, the audio carriers) are legitimately dead in the Stellaris build and `--gc-sections` drops them. They live in a `NOT STELLARIS_ONLY` branch. If a build fails on a missing symbol, work out which variant it belongs to and move it — do not delete it from the check.
 - **Installer identity**: `build.appId` (`io.github.sundaymoments.ds5bridge`) and `build.nsis.guid` must never change, or users get side-by-side installs instead of an upgrade. `test:installer` guards this.
 - **UI layout**: `companion/UI_STYLE_GUIDE.md` is a contract, not a suggestion — shared `:root` tokens, the `feature-heading` + `feature-card-grid` paired-card structure on every tab, `CustomSelect` instead of native `<select>`, `lucide-react` icons. Document deviations there first.
 - **Supply chain**: `companion/.npmrc` blocks git deps and packages younger than three days. Keep `npm ci` from the lockfile.

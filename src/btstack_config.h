@@ -17,7 +17,10 @@
 #define MAX_NR_HCI_ACL_PACKETS 4
 
 #define MAX_NR_HCI_CONNECTIONS 1
-#define MAX_NR_L2CAP_CHANNELS  2
+// CONTROL + INTERRUPT + the SDP client channel used to fetch a third-party
+// pad's HID report descriptor. The pool is static (no HAVE_MALLOC), so the
+// query silently fails to start if this is 2.
+#define MAX_NR_L2CAP_CHANNELS  3
 #define MAX_NR_L2CAP_SERVICES  3 // GDP + CONTROL + INTERRUPT
 //
 #define HCI_ACL_PAYLOAD_SIZE 1021

@@ -55,7 +55,7 @@ controller connections and firmware maintenance:
 | Gesture | Action |
 | --- | --- |
 | One brief press | If no controller is connected, open the controller pairing window. If a controller is connected, disconnect it while preserving its saved pairing. |
-| Two brief presses | Reboot the Pico normally. |
+| Two brief presses | Switch the bridge mode between DualSense and Stellaris (Xbox). The onboard LED blinks once for DualSense mode and twice for Stellaris mode, and the bridge re-enumerates on your PC under the new identity. The bridge always starts in DualSense mode after a power cycle. The Stellaris-only image has no second mode, so there this drives diagnostics instead: the first press types a report and walks you through a guided button capture, the second runs the rumble probe, and the third stops. Point a text editor at it first. |
 | Three brief presses | Reboot into USB firmware flashing mode. The Pico appears as a drive so you can copy a `.uf2` file onto it. |
 | Hold for about 1.5 seconds | Forget all saved controller pairings, disconnect the current controller, and open a fresh pairing window. |
 

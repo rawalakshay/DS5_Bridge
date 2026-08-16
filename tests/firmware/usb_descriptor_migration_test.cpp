@@ -1873,12 +1873,15 @@ void assert_bootsel_gestures_and_intentional_disconnects(std::filesystem::path c
             "bt_disconnect_with_intent(BtControllerDisconnectIntentSleep)"
         ) == std::string::npos
         || dispatch.find("bt_request_scan()") == std::string::npos
-        || dispatch.find("watchdog_reboot(0, 0, 0)") == std::string::npos
+        // Two presses switch bridge mode. This replaced a plain reboot gesture:
+        // rebooting was reachable by unplugging the Pico, while bridge mode has
+        // no other app-free control surface.
+        || dispatch.find("bridge_mode_toggle()") == std::string::npos
         || dispatch.find("reset_usb_boot(0, 0)") == std::string::npos
         || dispatch.find("bt_forget_pairings()") == std::string::npos
     ) {
         throw std::runtime_error(
-            "BOOTSEL must implement safe click, reboot, flashing, and forget-pairing gestures"
+            "BOOTSEL must implement safe click, bridge-mode switch, flashing, and forget-pairing gestures"
         );
     }
 

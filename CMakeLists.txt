@@ -71,9 +71,13 @@ pico_sdk_init()
 add_executable(ds5-bridge
         src/usb_descriptors.c
         src/main.cpp
+        src/bridge_mode.cpp
         src/button_functions.cpp
         src/kitsune_button_gesture.cpp
         src/dualsense_input_decoder.cpp
+        src/hid_report_descriptor.cpp
+        src/generic_hid_input_decoder.cpp
+        src/stellaris_diagnostics.cpp
         src/persona/host_persona.cpp
         src/persona/dualsense_persona.cpp
         src/persona/ds4_persona.cpp
@@ -293,6 +297,11 @@ relocate_to_ram(
         "Relocating DualSense input decoding to SRAM"
 )
 relocate_to_ram(
+        src/generic_hid_input_decoder.cpp.o
+        ".text._Z31generic_hid_decode_input_reportPKhtR21BridgeControllerState=.time_critical.controller_input_generic_decode"
+        "Relocating generic HID input decoding to SRAM"
+)
+relocate_to_ram(
         src/persona/host_persona.cpp.o
         ".text.host_persona_active=.time_critical.controller_input_active_persona@.text._Z25host_persona_encode_input15HostPersonaModeRK21BridgeControllerStateR22HostPersonaInputReport=.time_critical.controller_input_persona_encode"
         "Relocating host-persona input dispatch to SRAM"
@@ -390,6 +399,25 @@ if(ENABLE_COMPANION)
     target_compile_definitions(ds5-bridge PRIVATE
             ENABLE_COMPANION
     )
+endif()
+
+# Stellaris-only image: connect to a generic Bluetooth HID gamepad instead of a
+# DualSense and present as an Xbox 360 pad. This is a behaviour gate only -- the
+# source list is identical to the DualSense build, because cmake/relocate_to_ram
+# and cmake/verify_core1_sram both hard-fail on missing objects and symbols.
+option(STELLARIS_ONLY "Build the Stellaris-only Xbox bridge image" OFF)
+if(STELLARIS_ONLY)
+    if(NOT ENABLE_COMPANION)
+        # src/usb_app_drivers.cpp is wrapped in #ifdef ENABLE_COMPANION and is the
+        # only definition of usbd_app_driver_get_cb(), which registers the XUSB
+        # class driver with TinyUSB. Without it xusb360_usb_ready() never goes
+        # true and the bridge sends no input at all.
+        message(FATAL_ERROR "STELLARIS_ONLY requires ENABLE_COMPANION=ON (the XUSB class driver is registered there)")
+    endif()
+    target_compile_definitions(ds5-bridge PRIVATE
+            STELLARIS_ONLY=1
+    )
+    message(STATUS "Stellaris-only build: host persona pinned to Xbox 360, DualSense output paths disabled")
 endif()
 
 # Diagnostics live in one place. Quick presets:
@@ -508,6 +536,7 @@ add_custom_command(TARGET ds5-bridge POST_BUILD
                 "-DELF=$<TARGET_FILE:ds5-bridge>"
                 "-DMIN_HEAP_BYTES=${DS5_MIN_RUNTIME_HEAP_BYTES}"
                 "-DKNOWN_STARTUP_HEAP_BYTES=${DS5_KNOWN_STARTUP_HEAP_BYTES}"
+                "-DSTELLARIS_ONLY=$<BOOL:${STELLARIS_ONLY}>"
                 -P "${CMAKE_SOURCE_DIR}/cmake/verify_core1_sram.cmake"
         COMMENT "Verifying complete firmware hot paths and runtime heap headroom"
         VERBATIM

@@ -40,7 +40,14 @@
 #include "hardware/watchdog.h"
 #include "pico/sync.h"
 #include "pico/time.h"
+#include "bridge_latency.h"
+#include "bridge_mode.h"
+#include "generic_hid_input_decoder.h"
+#include "hid_report_descriptor.h"
+#include "bluetooth_sdp.h"
+#include "classic/sdp_client.h"
 #include "classic/sdp_server.h"
+#include "classic/sdp_util.h"
 
 #define MTU_CONTROL 256
 #define MTU_INTERRUPT 1691
@@ -370,6 +377,7 @@ static void request_control_can_send_if_needed(bool should_request_send);
 static bool audio_send_window_closed_locked(uint32_t now);
 static void request_control_if_audio_window_open_locked(uint32_t now, bool &should_request_control);
 static void finish_hid_session_if_ready();
+static void stellaris_begin_descriptor_query();
 static void init_state_report(uint8_t *report);
 static bool select_next_output_packet_locked(output_packet &packet, uint32_t now);
 static bool audio_output_route_protected();
@@ -2368,7 +2376,9 @@ bool bt_disconnect() {
 }
 
 bool bt_power_off_controller() {
-    if (hid_control_cid == 0) {
+    // Bypasses the output queues with a direct l2cap_send, so it needs its own
+    // gate. A generic pad has no DualSense power-off feature report.
+    if (hid_control_cid == 0 || bridge_mode_is_stellaris()) {
         return false;
     }
 
@@ -2388,6 +2398,77 @@ bool bt_power_off_controller() {
         return false;
     }
     return true;
+}
+
+uint8_t bt_send_raw_hid_output(uint8_t const *data, uint16_t len) {
+    if (!bridge_mode_is_stellaris()) {
+        return kBtRawOutputUnavailable;
+    }
+    if (hid_interrupt_cid == 0 || data == nullptr || len == 0 || len > 32) {
+        return kBtRawOutputUnavailable;
+    }
+    // Without this the send simply errors when the channel's credit is not
+    // free, and a probe would report a format as tried when nothing was ever
+    // transmitted.
+    if (!l2cap_can_send_packet_now(hid_interrupt_cid)) {
+        (void)l2cap_request_can_send_now_event(hid_interrupt_cid);
+        return kBtRawOutputBusy;
+    }
+
+    // 0xA2 = HIDP DATA | Output, then the report exactly as given. The normal
+    // output path would stamp a sequence nibble into byte 1 and append a CRC32,
+    // both of which are DualSense-specific and would corrupt these.
+    uint8_t packet[33];
+    packet[0] = 0xA2;
+    memcpy(packet + 1, data, len);
+
+    const uint8_t status = l2cap_send(hid_interrupt_cid, packet, static_cast<uint16_t>(len + 1));
+    if (status != 0) {
+        DS5_LOG("[L2CAP] Raw HID output send failed status=0x%02X\n", status);
+    }
+    return status;
+}
+
+void bt_stellaris_set_rumble(uint8_t left, uint8_t right) {
+    if (!bridge_mode_is_stellaris()) {
+        return;
+    }
+
+    // Output report 0x10 with a Switch-style rumble payload. Confirmed by
+    // probe: this is the only one of ten candidate formats the Stellaris
+    // responds to, and only in Windows pairing mode.
+    //
+    // The amplitude encoding is not decoded, so this is on/off rather than
+    // proportional -- a non-zero request from the host buzzes at the one
+    // pattern known to work.
+    static constexpr uint8_t kRumbleOn[] = {
+        0x10, 0x00, 0x74, 0xBE, 0xBD, 0x6F, 0x74, 0xBE, 0xBD, 0x6F
+    };
+    static constexpr uint8_t kRumbleOff[] = {
+        0x10, 0x01, 0x00, 0x01, 0x40, 0x40, 0x00, 0x01, 0x40, 0x40
+    };
+
+    const bool wanted = (left | right) != 0;
+
+    // Only send on a change. Games update rumble every frame, and repeating an
+    // identical frame at that rate would flood the shared interrupt lane the
+    // input reports arrive on.
+    static bool rumble_active = false;
+    static bool rumble_state_known = false;
+    if (rumble_state_known && wanted == rumble_active) {
+        return;
+    }
+
+    const uint8_t status = wanted
+        ? bt_send_raw_hid_output(kRumbleOn, sizeof(kRumbleOn))
+        : bt_send_raw_hid_output(kRumbleOff, sizeof(kRumbleOff));
+    if (status != kBtRawOutputSent) {
+        // Leave the state unknown so the next call retries rather than
+        // believing a frame that never left.
+        return;
+    }
+    rumble_active = wanted;
+    rumble_state_known = true;
 }
 
 bool bt_request_scan() {
@@ -2542,6 +2623,272 @@ void bt_l2cap_init() {
     l2cap_register_service(l2cap_packet_handler, PSM_HID_INTERRUPT, MTU_INTERRUPT, LEVEL_2);
 
     l2cap_init();
+}
+
+//
+// Generic HID report descriptor discovery.
+//
+// Stellaris mode has no hardcoded report layout, so the pad's own HID report
+// descriptor is fetched over SDP at connect time and parsed at runtime. That is
+// what lets a single image decode the Stellaris in each of its pairing modes,
+// which do not share a report format.
+//
+// BTstack delivers an attribute value one byte at a time, and the descriptor
+// sits two DES levels deep inside attribute 0x0206 (HIDDescriptorList), so it
+// is walked with the same incremental state machine BTstack's own HID host uses
+// (lib/btstack/src/classic/hid_host.c:393). Only the descriptor payload is
+// kept; the DES scaffolding is discarded as it is consumed.
+//
+// Note this needs MAX_NR_L2CAP_CHANNELS >= 3 in btstack_config.h: the SDP query
+// opens a third channel alongside HID control and interrupt.
+//
+enum HidDescriptorScanState : uint8_t {
+    HidDescriptorScanError,
+    HidDescriptorScanListStart,
+    HidDescriptorScanListHeader,
+    HidDescriptorScanDescriptorStart,
+    HidDescriptorScanDescriptorHeader,
+    HidDescriptorScanItemStart,
+    HidDescriptorScanItemHeader,
+    HidDescriptorScanItemBody,
+    HidDescriptorScanStringHeader,
+    HidDescriptorScanStringBody,
+    HidDescriptorScanComplete,
+};
+
+// Only ever holds a data-element header, which is at most 5 bytes.
+static uint8_t sdp_element_header[8];
+static uint8_t hid_descriptor_scan_state = HidDescriptorScanError;
+static uint32_t hid_descriptor_scan_needed = 0;
+static uint32_t hid_descriptor_scan_received = 0;
+static bool hid_descriptor_query_active = false;
+
+static bool sdp_element_header_store(uint8_t data) {
+    if (hid_descriptor_scan_received >= sizeof(sdp_element_header)) {
+        return false;
+    }
+    sdp_element_header[hid_descriptor_scan_received++] = data;
+    return true;
+}
+
+static void stellaris_handle_hid_descriptor_byte(uint16_t attribute_offset, uint8_t data) {
+    if (attribute_offset == 0) {
+        hid_descriptor_scan_state = HidDescriptorScanListStart;
+        hid_descriptor_scan_received = 0;
+        hid_descriptor_scan_needed = 0;
+        hid_report_descriptor_reset();
+    }
+
+    bool error = false;
+    switch (hid_descriptor_scan_state) {
+        case HidDescriptorScanListStart:
+            error = !sdp_element_header_store(data);
+            if (!error && de_get_element_type(sdp_element_header) == DE_DES) {
+                hid_descriptor_scan_needed = de_get_header_size(sdp_element_header);
+                hid_descriptor_scan_state = HidDescriptorScanListHeader;
+            } else {
+                error = true;
+            }
+            break;
+
+        case HidDescriptorScanListHeader:
+            error = !sdp_element_header_store(data);
+            if (!error && hid_descriptor_scan_received >= hid_descriptor_scan_needed) {
+                hid_descriptor_scan_received = 0;
+                hid_descriptor_scan_state = HidDescriptorScanDescriptorStart;
+            }
+            break;
+
+        case HidDescriptorScanDescriptorStart:
+            error = !sdp_element_header_store(data);
+            if (!error && de_get_element_type(sdp_element_header) == DE_DES) {
+                hid_descriptor_scan_needed = de_get_header_size(sdp_element_header);
+                hid_descriptor_scan_state = HidDescriptorScanDescriptorHeader;
+            } else {
+                error = true;
+            }
+            break;
+
+        case HidDescriptorScanDescriptorHeader:
+            error = !sdp_element_header_store(data);
+            if (!error && hid_descriptor_scan_received >= hid_descriptor_scan_needed) {
+                hid_descriptor_scan_received = 0;
+                hid_descriptor_scan_state = HidDescriptorScanItemStart;
+            }
+            break;
+
+        case HidDescriptorScanItemStart:
+            error = !sdp_element_header_store(data);
+            if (error) {
+                break;
+            }
+            hid_descriptor_scan_needed = de_get_header_size(sdp_element_header);
+            if (de_get_element_type(sdp_element_header) == DE_STRING) {
+                hid_descriptor_scan_state = HidDescriptorScanStringHeader;
+            } else if (hid_descriptor_scan_needed > 1) {
+                hid_descriptor_scan_state = HidDescriptorScanItemHeader;
+            } else {
+                hid_descriptor_scan_needed = de_get_len(sdp_element_header);
+                hid_descriptor_scan_state = HidDescriptorScanItemBody;
+            }
+            break;
+
+        case HidDescriptorScanItemHeader:
+            error = !sdp_element_header_store(data);
+            if (!error && hid_descriptor_scan_received >= hid_descriptor_scan_needed) {
+                hid_descriptor_scan_needed = de_get_len(sdp_element_header);
+                hid_descriptor_scan_state = HidDescriptorScanItemBody;
+            }
+            break;
+
+        case HidDescriptorScanItemBody:
+            // The descriptor type byte and any other non-string item; skipped.
+            hid_descriptor_scan_received++;
+            if (hid_descriptor_scan_received >= hid_descriptor_scan_needed) {
+                hid_descriptor_scan_received = 0;
+                hid_descriptor_scan_state = HidDescriptorScanItemStart;
+            }
+            break;
+
+        case HidDescriptorScanStringHeader:
+            error = !sdp_element_header_store(data);
+            if (!error && hid_descriptor_scan_received >= hid_descriptor_scan_needed) {
+                hid_descriptor_scan_received = 0;
+                hid_descriptor_scan_needed = de_get_data_size(sdp_element_header);
+                hid_descriptor_scan_state = HidDescriptorScanStringBody;
+            }
+            break;
+
+        case HidDescriptorScanStringBody:
+            if (!hid_report_descriptor_store_byte(data)) {
+                error = true;
+                break;
+            }
+            hid_descriptor_scan_received++;
+            if (hid_descriptor_scan_received >= hid_descriptor_scan_needed) {
+                hid_descriptor_scan_state = HidDescriptorScanComplete;
+            }
+            break;
+
+        default:
+            break;
+    }
+
+    if (error) {
+        hid_descriptor_scan_state = HidDescriptorScanError;
+    }
+}
+
+static void stellaris_sdp_query_handler(
+    uint8_t packet_type,
+    uint16_t channel,
+    uint8_t *packet,
+    uint16_t size
+) {
+    UNUSED(packet_type);
+    UNUSED(channel);
+    UNUSED(size);
+
+    switch (hci_event_packet_get_type(packet)) {
+        case SDP_EVENT_QUERY_ATTRIBUTE_BYTE:
+            if (
+                sdp_event_query_attribute_byte_get_attribute_id(packet)
+                == BLUETOOTH_ATTRIBUTE_HID_DESCRIPTOR_LIST
+            ) {
+                stellaris_handle_hid_descriptor_byte(
+                    sdp_event_query_attribute_byte_get_data_offset(packet),
+                    sdp_event_query_attribute_byte_get_data(packet)
+                );
+            }
+            break;
+
+        case SDP_EVENT_QUERY_COMPLETE: {
+            hid_descriptor_query_active = false;
+            // Carried into the diagnostic dump: a non-zero status here means the
+            // query itself failed (no HID service record, link dropped), which
+            // is a different problem from a record that simply carries no
+            // report descriptor.
+            const uint8_t query_status = sdp_event_query_complete_get_status(packet);
+            const uint16_t descriptor_len = hid_report_descriptor_length();
+            if (
+                descriptor_len > 0
+                && hid_report_descriptor_parse()
+                && generic_hid_apply_descriptor_layout(hid_report_descriptor_layout())
+            ) {
+                hid_report_descriptor_set_status(HidDescriptorFetchOk, 0);
+                DS5_LOG(
+                    "[SDP] HID report descriptor parsed, %u bytes\n",
+                    (unsigned int) descriptor_len
+                );
+            } else {
+                hid_report_descriptor_set_status(
+                    descriptor_len == 0
+                        ? HidDescriptorFetchNoData
+                        : HidDescriptorFetchParseFailed,
+                    query_status
+                );
+                // Not fatal: the decoder keeps its built-in layout, which is
+                // right for most generic pads and wrong in a way the diagnostic
+                // dump makes visible.
+                DS5_LOG(
+                    "[SDP] No usable HID report descriptor (%u bytes); keeping fallback layout\n",
+                    (unsigned int) descriptor_len
+                );
+            }
+            break;
+        }
+
+        default:
+            break;
+    }
+}
+
+static btstack_context_callback_registration_t sdp_query_registration;
+
+// Runs from BTstack's run loop once the SDP client is free, never from inside a
+// packet handler. Starting the query directly from the L2CAP channel-opened
+// event -- which is where the connection is finalised -- creates an L2CAP
+// channel while the stack is mid-callback, and the query never gets off the
+// ground.
+static void stellaris_run_descriptor_query(void *context) {
+    UNUSED(context);
+    const uint8_t status = sdp_client_query_uuid16(
+        &stellaris_sdp_query_handler,
+        current_device_addr,
+        BLUETOOTH_SERVICE_CLASS_HUMAN_INTERFACE_DEVICE_SERVICE
+    );
+    if (status != ERROR_CODE_SUCCESS) {
+        DS5_LOG(
+            "[SDP] HID descriptor query rejected (0x%02X); keeping fallback layout\n",
+            (unsigned int) status
+        );
+        hid_report_descriptor_set_status(HidDescriptorFetchQueryFailed, status);
+        hid_descriptor_query_active = false;
+    }
+}
+
+static void stellaris_begin_descriptor_query() {
+    if (hid_descriptor_query_active) {
+        return;
+    }
+    hid_report_descriptor_reset();
+    generic_hid_reset();
+    bridge_latency_reset();
+    hid_descriptor_scan_state = HidDescriptorScanError;
+    hid_descriptor_query_active = true;
+    hid_report_descriptor_set_status(HidDescriptorFetchPending, 0);
+
+    sdp_query_registration.callback = &stellaris_run_descriptor_query;
+    sdp_query_registration.context = nullptr;
+    const uint8_t status = sdp_client_register_query_callback(&sdp_query_registration);
+    if (status != ERROR_CODE_SUCCESS) {
+        DS5_LOG(
+            "[SDP] Could not queue HID descriptor query (0x%02X)\n",
+            (unsigned int) status
+        );
+        hid_report_descriptor_set_status(HidDescriptorFetchQueryFailed, status);
+        hid_descriptor_query_active = false;
+    }
 }
 
 static void open_next_hid_channel_if_needed() {
@@ -3931,6 +4278,21 @@ static void finish_hid_session_if_ready() {
     inactive_time = now_us;
     arm_signal_strength_idle_epoch(now_us);
 
+    if (bridge_mode_is_stellaris()) {
+        // A third-party pad answers none of the DualSense vendor reports, so the
+        // feature probe below would either be NAKed -- and the 0x02 handshake
+        // fallback would misfile it as a DualSense -- or ignored, leaving the
+        // type check pending forever and never publishing to USB. Classify it
+        // here instead, and publish immediately so the host sees a gamepad
+        // regardless of how the descriptor query goes.
+        controller_type = ControllerTypeGenericHid;
+        controller_type_check_pending = false;
+        DS5_LOG("[L2CAP] Connected controller accepted as generic HID gamepad\n");
+        stellaris_begin_descriptor_query();
+        usb_handle_controller_transport_ready();
+        return;
+    }
+
     DS5_LOG("Init DualSense\n");
     init_feature();
     reset_lightbar_setup();
@@ -4425,6 +4787,12 @@ static bool make_output_packet(
 }
 
 static bool enqueue_urgent_output(uint8_t *data, uint16_t len, uint8_t reason) {
+    if (bridge_mode_is_stellaris()) {
+        // Nothing is ever sent to a generic pad. Refusing here rather than at
+        // the l2cap_send call sites means the queues stay empty and
+        // request_can_send_if_needed() never arms the send-now event at all.
+        return false;
+    }
     output_packet packet{};
     if (!make_output_packet(data, len, OutputPacketUrgent, reason, packet)) {
         return false;
@@ -4501,6 +4869,9 @@ static bool same_control_report_target(control_packet const &left, control_packe
 }
 
 static bool enqueue_control_packet(uint8_t const *data, uint16_t len, bool coalescible) {
+    if (bridge_mode_is_stellaris()) {
+        return false;
+    }
     control_packet packet{};
     if (!make_control_packet(data, len, coalescible, packet)) {
         return false;
@@ -5206,7 +5577,7 @@ static void merge_state_output_locked(uint8_t const *data, uint16_t len, uint32_
 }
 
 static bool enqueue_state_output(uint8_t *data, uint16_t len, uint8_t reason) {
-    if (hid_interrupt_cid == 0) {
+    if (hid_interrupt_cid == 0 || bridge_mode_is_stellaris()) {
         return false;
     }
     const uint32_t now = time_us_32();
@@ -5289,6 +5660,7 @@ bool bt_write_classified_output(uint8_t *data, uint16_t len) {
 bool __not_in_flash_func(bt_write_audio_stream)(uint8_t *data, uint16_t len) {
     if (
         hid_interrupt_cid == 0
+        || bridge_mode_is_stellaris()
         || data == nullptr
         || len + 1u > AUDIO_INTERRUPT_PACKET_MAX_SIZE
     ) {

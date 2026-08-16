@@ -5,6 +5,7 @@
 
 #include "audio.h"
 #include "audio_exact_queue.h"
+#include "bridge_mode.h"
 #include "bt.h"
 #include "controller_output_policy.h"
 #include "controller_output_state.h"
@@ -2228,7 +2229,12 @@ void __not_in_flash_func(audio_loop)() {
     audio_core1_stack_poll(now);
     process_mic_usb_output();
 
-    if (!bt_is_controller_connected()) {
+    // bt_is_controller_connected() is only "the HID interrupt channel is open",
+    // so it goes true for a generic pad too. Treat Stellaris mode as
+    // permanently disconnected: a third-party pad has no DualSense speaker,
+    // microphone, or haptics endpoint, and the existing disconnect path already
+    // drains the queues and closes the route correctly.
+    if (bridge_mode_is_stellaris() || !bt_is_controller_connected()) {
         controller_mic_state_valid = false;
         clear_mic_queues();
         discard_usb_audio_packets(AUDIO_LOOP_MAX_USB_READS);

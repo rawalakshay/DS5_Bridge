@@ -45,6 +45,7 @@
 #include "generic_hid_input_decoder.h"
 #include "hid_report_descriptor.h"
 #include "stellaris_diagnostics.h"
+#include "switch_rumble.h"
 #include "bluetooth_sdp.h"
 #include "classic/sdp_client.h"
 #include "classic/sdp_server.h"
@@ -2435,40 +2436,41 @@ void bt_stellaris_set_rumble(uint8_t left, uint8_t right) {
         return;
     }
 
-    // Output report 0x10 with a Switch-style rumble payload. Confirmed by
-    // probe: this is the only one of ten candidate formats the Stellaris
-    // responds to, and only in Windows pairing mode.
-    //
-    // The amplitude encoding is not decoded, so this is on/off rather than
-    // proportional -- a non-zero request from the host buzzes at the one
-    // pattern known to work.
-    static constexpr uint8_t kRumbleOn[] = {
-        0x10, 0x00, 0x74, 0xBE, 0xBD, 0x6F, 0x74, 0xBE, 0xBD, 0x6F
-    };
-    static constexpr uint8_t kRumbleOff[] = {
-        0x10, 0x01, 0x00, 0x01, 0x40, 0x40, 0x00, 0x01, 0x40, 0x40
-    };
-
-    const bool wanted = (left | right) != 0;
-
-    // Only send on a change. Games update rumble every frame, and repeating an
-    // identical frame at that rate would flood the shared interrupt lane the
-    // input reports arrive on.
-    static bool rumble_active = false;
+    static uint8_t last_left = 0;
+    static uint8_t last_right = 0;
     static bool rumble_state_known = false;
-    if (rumble_state_known && wanted == rumble_active) {
+    static uint8_t rumble_sequence = 0;
+    static uint32_t last_sent_us = 0;
+
+    // Games update rumble every frame. Repeating frames at that rate would
+    // flood the same L2CAP interrupt lane the input reports arrive on, so
+    // changes are rate limited -- except a stop, which must never be delayed or
+    // the motors keep running.
+    constexpr uint32_t kMinResendIntervalUs = 40000;
+
+    const bool stopping = (left | right) == 0;
+    const bool changed = !rumble_state_known || left != last_left || right != last_right;
+    if (!changed) {
+        return;
+    }
+    const uint32_t now = time_us_32();
+    if (!stopping && rumble_state_known
+        && static_cast<uint32_t>(now - last_sent_us) < kMinResendIntervalUs) {
         return;
     }
 
-    const uint8_t status = wanted
-        ? bt_send_raw_hid_output(kRumbleOn, sizeof(kRumbleOn))
-        : bt_send_raw_hid_output(kRumbleOff, sizeof(kRumbleOff));
-    if (status != kBtRawOutputSent) {
+    uint8_t frame[kSwitchRumbleFrameBytes];
+    switch_rumble_encode_frame(frame, rumble_sequence, left, right);
+
+    if (bt_send_raw_hid_output(frame, sizeof(frame)) != kBtRawOutputSent) {
         // Leave the state unknown so the next call retries rather than
         // believing a frame that never left.
         return;
     }
-    rumble_active = wanted;
+    rumble_sequence++;
+    last_left = left;
+    last_right = right;
+    last_sent_us = now;
     rumble_state_known = true;
 }
 

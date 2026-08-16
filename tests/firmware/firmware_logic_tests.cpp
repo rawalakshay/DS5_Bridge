@@ -18,6 +18,7 @@
 #include "dualsense_output.h"
 #include "generic_hid_input_decoder.h"
 #include "hid_report_descriptor.h"
+#include "switch_rumble.h"
 #include "haptics_test_signal.h"
 #include "kitsune_button_gesture.h"
 #include "output_scheduler.h"
@@ -2040,6 +2041,49 @@ void generic_hid_decoder_keeps_android_and_windows_layouts_distinct() {
     generic_hid_reset();
 }
 
+void switch_rumble_encoder_scales_amplitude_and_preserves_neutral() {
+    uint8_t motor[kSwitchRumbleMotorBytes]{};
+
+    // Zero must reproduce the neutral bytes exactly. That frame is the one
+    // verified on hardware to stop the motors; drifting from it would leave
+    // them running.
+    switch_rumble_encode_motor(motor, 0);
+    EXPECT_EQ(motor[0], 0x00);
+    EXPECT_EQ(motor[1], 0x01);
+    EXPECT_EQ(motor[2], 0x40);
+    EXPECT_EQ(motor[3], 0x40);
+
+    switch_rumble_encode_motor(motor, 255);
+    EXPECT_EQ(motor[1], 0xC9);
+    EXPECT_EQ(motor[3], 0x72);
+
+    // Both amplitude fields must rise monotonically, and the high-frequency
+    // amplitude must stay even -- an odd value there spills into the frequency
+    // bits and detunes the motor instead of driving it harder.
+    uint8_t previous_high = 0;
+    uint8_t previous_low = 0;
+    for (uint16_t intensity = 0; intensity <= 255; ++intensity) {
+        switch_rumble_encode_motor(motor, static_cast<uint8_t>(intensity));
+        const uint8_t high = static_cast<uint8_t>(motor[1] - 0x01);
+        EXPECT_TRUE((high & 0x01) == 0);
+        EXPECT_TRUE(high >= previous_high);
+        EXPECT_TRUE(motor[3] >= previous_low);
+        EXPECT_TRUE(motor[3] >= 0x40 && motor[3] <= 0x72);
+        previous_high = high;
+        previous_low = motor[3];
+    }
+
+    // A full frame carries the report ID, a 4-bit sequence, then both motors
+    // independently.
+    uint8_t frame[kSwitchRumbleFrameBytes]{};
+    switch_rumble_encode_frame(frame, 0x1F, 255, 0);
+    EXPECT_EQ(frame[0], 0x10);
+    EXPECT_EQ(frame[1], 0x0F); // sequence masked to 4 bits
+    EXPECT_EQ(frame[3], 0xC9); // left at full
+    EXPECT_EQ(frame[7], 0x01); // right at rest
+    EXPECT_EQ(frame[9], 0x40);
+}
+
 void generic_hid_decoder_ignores_short_reports_when_adopting_report_id() {
     generic_hid_reset();
 
@@ -2076,6 +2120,7 @@ std::vector<TestCase> tests{
     {"generic hid decoder matches captured stellaris controls", generic_hid_decoder_matches_captured_stellaris_controls},
     {"generic hid decoder selects windows mode layout", generic_hid_decoder_selects_windows_mode_layout},
     {"generic hid decoder keeps android and windows layouts distinct", generic_hid_decoder_keeps_android_and_windows_layouts_distinct},
+    {"switch rumble encoder scales amplitude and preserves neutral", switch_rumble_encoder_scales_amplitude_and_preserves_neutral},
     {"generic hid decoder ignores short reports when adopting report id", generic_hid_decoder_ignores_short_reports_when_adopting_report_id},
     {"scheduler prioritizes due audio over old state", scheduler_prioritizes_due_audio_over_old_state},
     {"scheduler sends coalesced state when audio is absent", scheduler_sends_coalesced_state_when_audio_is_absent},

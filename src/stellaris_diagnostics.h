@@ -14,7 +14,8 @@
 // to reuse it.
 //
 // Triggered by a BOOTSEL double-press, which in this image no longer has a
-// bridge mode to switch to. Compiled to no-ops unless STELLARIS_ONLY.
+// bridge mode to switch to. Inert while a DualSense is connected -- that pad
+// has the companion app as its diagnostic surface.
 //
 
 // Captures a snapshot and begins typing. Ignored while a dump is in progress.

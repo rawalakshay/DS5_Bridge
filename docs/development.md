@@ -37,7 +37,6 @@ into `uf2_builds/`:
 ```powershell
 make pico-build PICO_SDK_PATH=/path/to/pico-sdk
 make pico-build DIAGNOSTICS=traces PICO_SDK_PATH=/path/to/pico-sdk
-make stellaris-build PICO_SDK_PATH=/path/to/pico-sdk
 make help
 ```
 
@@ -49,25 +48,27 @@ Built images land in `uf2_builds/` as `ds5-bridge-DDMMYY-HHMM.uf2`, alongside a
 git-ignored. The stamp does not record the board or the diagnostics preset, so a
 `DIAGNOSTICS=traces` image is not distinguishable from a release one by name.
 
-### Stellaris-only image
+### Controller support
 
-`make stellaris-build` produces `ds5-bridge-stellaris-DDMMYY-HHMM.uf2` from the
-same sources with `-DSTELLARIS_ONLY=ON`. That image connects to a generic
-Bluetooth HID gamepad instead of a DualSense and always presents as an Xbox 360
-controller. It reads the pad's HID report descriptor over SDP at connect time
-rather than assuming a byte layout, and every DualSense output path -- lightbar,
-haptics, adaptive triggers, speaker, microphone -- is compiled out.
+One image handles both a DualSense and a generic Bluetooth HID gamepad. Whichever
+controller connects first decides the session: a DualSense gets the native persona
+with audio, haptics, adaptive triggers and lightbar; anything else is decoded from
+its own HID report descriptor and presented as an Xbox 360 controller. There is no
+build flag and no reflash to switch — unplug one pad, connect the other.
 
-The two images are separate build trees and separate artifacts; flashing
-`pico-build`'s image restores full DualSense behaviour. `STELLARIS_ONLY` requires
-`ENABLE_COMPANION=ON`, because `src/usb_app_drivers.cpp` is the only place the
-XUSB class driver is registered with TinyUSB; the CMake configure fails loudly
-otherwise.
+`ENABLE_COMPANION=ON` is required regardless, because `src/usb_app_drivers.cpp` is
+the only place the XUSB class driver is registered with TinyUSB.
 
-Note the two images link different halves of the input hot path, so
-`cmake/verify_core1_sram.cmake` splits its required-symbol list accordingly. A
-symbol that is legitimately dead in one configuration must move into the right
-branch rather than being dropped from the check.
+Note `cmake/verify_core1_sram.cmake` only checks that symbols *land* in SRAM, never
+what they *call*. After changing anything inside an SRAM-relocated function,
+disassemble it and confirm every branch target is `0x2xxxxxxx` with no `_veneer`:
+
+```
+arm-none-eabi-objdump -d build/pico2w/ds5-bridge.elf \
+  | awk '/<_Z10on_bt_data/,/^$/' | grep -E '\sbl\s|\sb\.w\s'
+```
+
+A flash call from there faults while core 1 has XIP paused for a flash write.
 
 To drive CMake directly instead:
 

@@ -4,13 +4,12 @@
 
 #include "stellaris_diagnostics.h"
 
-#if STELLARIS_ONLY
-
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
 
 #include "bridge_latency.h"
+#include "bridge_mode.h"
 #include "bt.h"
 #include "generic_hid_input_decoder.h"
 #include "hid_report_descriptor.h"
@@ -492,6 +491,12 @@ void build_guided_result(bool timed_out, uint32_t mask, uint16_t hat) {
 } // namespace
 
 void stellaris_diagnostics_request_dump() {
+    // Only meaningful for a generic pad. With a DualSense connected the layout
+    // is known, the companion app is the diagnostic surface, and typing into
+    // the user's editor would be pure surprise.
+    if (!bridge_mode_is_stellaris()) {
+        return;
+    }
     // Three-state cycle on the one free gesture: dump and capture input, then
     // probe for a working rumble format, then stop. Stopping matters -- neither
     // phase should be left running into whatever window gets focus next.
@@ -685,13 +690,3 @@ void stellaris_diagnostics_poll(uint32_t now_ms) {
         next_event_ms = now_ms + kKeyIntervalMs;
     }
 }
-
-#else // STELLARIS_ONLY
-
-void stellaris_diagnostics_request_dump() {}
-
-void stellaris_diagnostics_poll(uint32_t now_ms) {
-    (void) now_ms;
-}
-
-#endif // STELLARIS_ONLY

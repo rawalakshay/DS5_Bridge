@@ -2041,6 +2041,51 @@ void generic_hid_decoder_keeps_android_and_windows_layouts_distinct() {
     generic_hid_reset();
 }
 
+// The two decoders used to be mutually exclusive at compile time. In the merged
+// firmware both are linked and reachable from the same on_bt_data, chosen per
+// connection, so neither may leave state behind that disturbs the other.
+void both_decoders_are_co_resident_and_independent() {
+    const auto ds_report = sample_dualsense_input_report();
+    const std::array<uint8_t, 11> generic_report{
+        0x07, 0x5B, 0x05, 0x80, 0x80, 0x0F, 0x00, 0x00, 0x00, 0x00, 0x00};
+
+    generic_hid_reset();
+
+    // Interleave them, which is what a controller swap looks like from here.
+    for (int round = 0; round < 3; ++round) {
+        BridgeControllerState ds_state{};
+        EXPECT_TRUE(dualsense_decode_usb_input_report(
+            ds_report.data(), static_cast<uint16_t>(ds_report.size()), ds_state));
+        EXPECT_TRUE(ds_state.dualsense_report_len == kDualSenseUsbInputReportSize);
+
+        BridgeControllerState generic_state{};
+        EXPECT_TRUE(generic_hid_decode_input_report(
+            generic_report.data(), static_cast<uint16_t>(generic_report.size()), generic_state));
+        EXPECT_EQ(generic_state.left_stick_x, 0x5B);
+        EXPECT_EQ(generic_state.left_stick_y, 0x05);
+
+        // The generic decoder must not fabricate a raw DualSense report -- the
+        // DualSense persona keys off dualsense_report_len and would encode
+        // garbage from a generic pad's state.
+        EXPECT_EQ(generic_state.dualsense_report_len, 0);
+    }
+
+    // Both feed the same persona layer, and each must encode through it.
+    BridgeControllerState state{};
+    EXPECT_TRUE(generic_hid_decode_input_report(
+        generic_report.data(), static_cast<uint16_t>(generic_report.size()), state));
+    HostPersonaInputReport xusb{};
+    EXPECT_TRUE(host_persona_encode_input(HostPersonaModeXusb360, state, xusb));
+
+    BridgeControllerState ds_state{};
+    EXPECT_TRUE(dualsense_decode_usb_input_report(
+        ds_report.data(), static_cast<uint16_t>(ds_report.size()), ds_state));
+    HostPersonaInputReport native{};
+    EXPECT_TRUE(host_persona_encode_input(HostPersonaModeDualSense, ds_state, native));
+
+    generic_hid_reset();
+}
+
 void switch_rumble_encoder_scales_amplitude_and_preserves_neutral() {
     uint8_t motor[kSwitchRumbleMotorBytes]{};
 
@@ -2120,6 +2165,7 @@ std::vector<TestCase> tests{
     {"generic hid decoder matches captured stellaris controls", generic_hid_decoder_matches_captured_stellaris_controls},
     {"generic hid decoder selects windows mode layout", generic_hid_decoder_selects_windows_mode_layout},
     {"generic hid decoder keeps android and windows layouts distinct", generic_hid_decoder_keeps_android_and_windows_layouts_distinct},
+    {"both decoders are co-resident and independent", both_decoders_are_co_resident_and_independent},
     {"switch rumble encoder scales amplitude and preserves neutral", switch_rumble_encoder_scales_amplitude_and_preserves_neutral},
     {"generic hid decoder ignores short reports when adopting report id", generic_hid_decoder_ignores_short_reports_when_adopting_report_id},
     {"scheduler prioritizes due audio over old state", scheduler_prioritizes_due_audio_over_old_state},

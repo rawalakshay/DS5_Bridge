@@ -108,6 +108,9 @@
 #define CONTROL_SEND_HEADSET_AUDIO_IDLE_US AUDIO_STREAM_IDLE_US
 #define FEATURE_PREFETCH_MAX_REQUESTS 16
 #define FEATURE_PREFETCH_SPACING_US 5000u
+// A DualSense answers the 0x20 probe in milliseconds; this only has to outlast
+// the paced prefetch queue and a retransmit or two.
+#define CONTROLLER_TYPE_DETECT_TIMEOUT_US 2000000u
 #define CONTROLLER_DISCONNECT_REBOOT_DELAY_MS 25
 #define DISCONNECT_RETRY_DELAY_US 250000u
 #define DISCONNECT_RETRY_EVENT_TIMEOUT_US 1000000u
@@ -380,6 +383,7 @@ static bool audio_send_window_closed_locked(uint32_t now);
 static void request_control_if_audio_window_open_locked(uint32_t now, bool &should_request_control);
 static void finish_hid_session_if_ready();
 static void stellaris_begin_descriptor_query();
+static void publish_controller_as(ControllerType type);
 static void init_state_report(uint8_t *report);
 static bool select_next_output_packet_locked(output_packet &packet, uint32_t now);
 static bool audio_output_route_protected();
@@ -425,6 +429,12 @@ static uint16_t hid_interrupt_pending_cid;
 static bt_data_callback_t bt_data_callback = nullptr;
 static uint8_t controller_type = ControllerTypeUnknown;
 static bool controller_type_check_pending = false;
+// Deadline for the DualSense probe. Without one, a pad that answers neither the
+// 0x20 feature report nor a control-channel NAK leaves the check pending
+// forever and the bridge never attaches to USB at all -- it sits dead until the
+// 15 minute idle disconnect fires. On expiry the pad is published as a generic
+// HID gamepad, which is the correct reading of "did not answer a Sony probe".
+static uint32_t controller_type_deadline_us = 0;
 static bool hid_control_ready = false;
 static bool hid_interrupt_ready = false;
 static HidConnectionInitiator hid_connection_initiator = HidConnectionInitiator::None;
@@ -2895,6 +2905,56 @@ static void stellaris_begin_descriptor_query() {
     }
 }
 
+//
+// The single place a connected controller becomes visible to the USB host.
+//
+// Ordering matters and is the whole point of routing all three classification
+// outcomes through here: the persona must be latched BEFORE
+// usb_handle_controller_transport_ready(). The bridge does not enumerate at
+// boot -- main() brings TinyUSB up detached -- and descriptors are pulled from
+// host_persona_active() at GET_DESCRIPTOR time. So a persona chosen here costs
+// no re-enumeration at all, because the host has never seen a descriptor to
+// invalidate. Publishing first and correcting afterwards would enumerate the
+// wrong identity and need a reconnect cycle to undo.
+//
+static void publish_controller_as(ControllerType type) {
+    controller_type = type;
+    controller_type_check_pending = false;
+    controller_type_deadline_us = 0;
+
+    const bool generic = type == ControllerTypeGenericHid;
+    bridge_mode_latch(generic ? BridgeModeStellaris : BridgeModeDualSense);
+
+    const HostPersonaMode target_persona = generic
+        ? HostPersonaModeXusb360
+        : HostPersonaModeDualSense;
+    if (host_persona_active() != target_persona) {
+        if (!host_persona_set_active(target_persona)) {
+            DS5_LOG(
+                "[L2CAP] Persona %u unsupported; publishing with %u\n",
+                static_cast<unsigned int>(target_persona),
+                static_cast<unsigned int>(host_persona_active())
+            );
+        }
+    }
+
+    if (generic) {
+        // No hardcoded byte layout for a third-party pad: ask it for its own
+        // report descriptor. Deliberately does not block the publish below --
+        // the pad appears to the host either way, and the decoder falls back to
+        // a built-in layout if the query yields nothing.
+        stellaris_begin_descriptor_query();
+    } else {
+        // DualSense-only output, held back until now so none of it is ever sent
+        // to a pad that would not understand it.
+        reset_lightbar_setup();
+        bt_set_lightbar_color(0x00, 0x00, 0xff, 100);
+        bt_schedule_lightbar_restore(250);
+    }
+
+    usb_handle_controller_transport_ready();
+}
+
 static void open_next_hid_channel_if_needed() {
     if (
         acl_handle == HCI_CON_HANDLE_INVALID
@@ -3113,6 +3173,20 @@ void bt_connection_recovery_loop() {
 }
 
 void bt_feature_prefetch_loop() {
+    // Resolve a stalled controller-type probe. A pad that answers neither the
+    // 0x20 feature report nor a NAK would otherwise leave the check pending
+    // forever, and since the USB attach is downstream of classification the
+    // bridge would never appear on the host at all.
+    if (
+        controller_type_check_pending
+        && controller_type_deadline_us != 0
+        && hid_interrupt_cid != 0
+        && bt_time_reached(time_us_32(), controller_type_deadline_us)
+    ) {
+        DS5_LOG("[L2CAP] Controller type probe timed out; treating as generic HID gamepad\n");
+        publish_controller_as(ControllerTypeGenericHid);
+    }
+
     if (feature_prefetch_index >= feature_prefetch_count) {
         clear_feature_prefetch_queue();
         return;
@@ -3942,6 +4016,14 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
             clear_feature_prefetch_queue();
             controller_type = ControllerTypeUnknown;
             controller_type_check_pending = false;
+            controller_type_deadline_us = 0;
+            // The next controller is classified from scratch, so drop every
+            // per-pad decision with the link. Bridge mode returns to the
+            // DualSense default; a generic pad re-latches it on connect.
+            bridge_mode_reset_to_default();
+            generic_hid_reset();
+            bridge_latency_reset();
+            stellaris_diagnostics_reset();
             hid_channel_recovery_pending = false;
             hid_channel_recovery_attempts = 0;
             critical_section_enter_blocking(&queue_lock);
@@ -4282,26 +4364,14 @@ static void finish_hid_session_if_ready() {
     inactive_time = now_us;
     arm_signal_strength_idle_epoch(now_us);
 
-    if (bridge_mode_is_stellaris()) {
-        // A third-party pad answers none of the DualSense vendor reports, so the
-        // feature probe below would either be NAKed -- and the 0x02 handshake
-        // fallback would misfile it as a DualSense -- or ignored, leaving the
-        // type check pending forever and never publishing to USB. Classify it
-        // here instead, and publish immediately so the host sees a gamepad
-        // regardless of how the descriptor query goes.
-        controller_type = ControllerTypeGenericHid;
-        controller_type_check_pending = false;
-        DS5_LOG("[L2CAP] Connected controller accepted as generic HID gamepad\n");
-        stellaris_begin_descriptor_query();
-        usb_handle_controller_transport_ready();
-        return;
-    }
-
+    // Probe for a DualSense. The type is not known yet, so nothing
+    // DualSense-specific may be emitted here -- the 0x20 GET_REPORT is the one
+    // exception, and it is safe because a third-party pad simply NAKs or
+    // ignores it. Lightbar and player-LED setup moved into
+    // publish_controller_as(), which runs once the answer is in.
     DS5_LOG("Init DualSense\n");
     init_feature();
-    reset_lightbar_setup();
-    bt_set_lightbar_color(0x00, 0x00, 0xff, 100);
-    bt_schedule_lightbar_restore(250);
+    controller_type_deadline_us = time_us_32() + CONTROLLER_TYPE_DETECT_TIMEOUT_US;
 }
 
 static __attribute__((optimize("O2"))) void __not_in_flash_func(handle_l2cap_can_send_now)(uint8_t *packet) {
@@ -4441,20 +4511,28 @@ static __attribute__((noinline)) void l2cap_packet_handler_cold(
             const bool edge_type_response = firmware_type_response && packet[23] == 0x44;
             if (controller_type_check_pending) {
                 if (firmware_type_response) {
-                    controller_type = edge_type_response
-                        ? ControllerTypeDualSenseEdge
-                        : ControllerTypeDualSense;
-                    controller_type_check_pending = false;
                     DS5_LOG(
                         "[L2CAP] Connected controller detected as %s\n",
                         edge_type_response ? "DualSense Edge" : "DualSense"
                     );
-                    usb_handle_controller_transport_ready();
+                    publish_controller_as(
+                        edge_type_response
+                            ? ControllerTypeDualSenseEdge
+                            : ControllerTypeDualSense
+                    );
                 } else if (size > 0 && packet[0] == 0x02) {
-                    controller_type = ControllerTypeDualSense;
-                    controller_type_check_pending = false;
-                    DS5_LOG("[L2CAP] Connected controller detected as DualSense\n");
-                    usb_handle_controller_transport_ready();
+                    // HIDP HANDSHAKE carrying ERR_INVALID_REPORT_ID: the pad
+                    // rejected the vendor probe.
+                    //
+                    // This used to be read as proof of a base DualSense, and it
+                    // was correct then -- the probe was the Edge-only report
+                    // 0x70, which a non-Edge DualSense legitimately NAKs. The
+                    // probe is now 0x20, which every DualSense answers
+                    // positively, so a NAK today means the opposite: not a Sony
+                    // pad at all. Reading it the old way is what published a
+                    // third-party pad as a phantom DualSense.
+                    DS5_LOG("[L2CAP] Vendor probe rejected; treating as generic HID gamepad\n");
+                    publish_controller_as(ControllerTypeGenericHid);
                 }
             } else if (
                 edge_type_response

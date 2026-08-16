@@ -143,37 +143,27 @@ set(required_sram_symbols
         "memmove"
 )
 
-# The two images route controller input through different decoders, so each one
-# links a different half of the hot path and --gc-sections drops the other. A
-# symbol that is legitimately absent must not be demanded, or the check stops
-# meaning anything.
-if(STELLARIS_ONLY)
-    # Input arrives from a generic HID gamepad and is decoded from its report
-    # descriptor.
-    list(APPEND required_sram_symbols
-            "_Z31generic_hid_decode_input_reportPKhtR21BridgeControllerState"
-    )
-else()
-    # The DualSense path: the companion report rewriter (chords, remap,
-    # deadzone), the DualSense and DS4 personas, and the audio carriers that
-    # ride the same 0x31 report. All unreachable in the Stellaris image, where
-    # on_bt_data hands off to the generic decoder before any of it.
-    list(APPEND required_sram_symbols
-            "_Z35companion_process_controller_reportPht"
-            "_Z34companion_update_controller_reportPKht"
-            "_ZN12_GLOBAL__N_120queue_shortcut_eventEh|_ZN12_GLOBAL__N_1L20queue_shortcut_eventEh"
-            "_ZN12_GLOBAL__N_127dpad_direction_from_buttonsEbbbb|_ZN12_GLOBAL__N_1L27dpad_direction_from_buttonsEbbbb"
-            "_Z30dualsense_persona_encode_inputRK21BridgeControllerStateR22HostPersonaInputReport"
-            "_Z24ds4_persona_encode_inputRK21BridgeControllerStateR22HostPersonaInputReport"
-            "_Z11set_headsetb"
-            "_Z20audio_mic_add_packetPKht"
-            "_ZL24process_usb_audio_packetv"
-            # Loses all but one call site once audio_loop returns early, and is
-            # then inlined into try_send_pending_audio_batch, which stays
-            # checked above.
-            "_ZL25send_audio_haptics_packetPKabb"
-    )
-endif()
+# Both controller paths are live in one image now, so every symbol below must
+# link. Each of these was dead in one of the old single-purpose builds only
+# because the mode gate was a compile-time constant; with it a runtime read,
+# --gc-sections keeps them all.
+list(APPEND required_sram_symbols
+        # Generic HID pad input.
+        "_Z31generic_hid_decode_input_reportPKhtR21BridgeControllerState"
+        # DualSense input: the companion report rewriter (chords, remap,
+        # deadzone), the Sony personas, and the audio carriers that ride the
+        # same 0x31 report.
+        "_Z35companion_process_controller_reportPht"
+        "_Z34companion_update_controller_reportPKht"
+        "_ZN12_GLOBAL__N_120queue_shortcut_eventEh|_ZN12_GLOBAL__N_1L20queue_shortcut_eventEh"
+        "_ZN12_GLOBAL__N_127dpad_direction_from_buttonsEbbbb|_ZN12_GLOBAL__N_1L27dpad_direction_from_buttonsEbbbb"
+        "_Z30dualsense_persona_encode_inputRK21BridgeControllerStateR22HostPersonaInputReport"
+        "_Z24ds4_persona_encode_inputRK21BridgeControllerStateR22HostPersonaInputReport"
+        "_Z11set_headsetb"
+        "_Z20audio_mic_add_packetPKht"
+        "_ZL24process_usb_audio_packetv"
+        "_ZL25send_audio_haptics_packetPKabb"
+)
 
 # RP2350 SRAM spans [0x20000000, 0x20082000).
 set(rp2350_sram_start 536870912)

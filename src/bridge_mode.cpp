@@ -12,13 +12,16 @@
 
 namespace {
 
-#if STELLARIS_ONLY
-constexpr BridgeMode kDefaultBridgeMode = BridgeModeStellaris;
-#else
+// The bridge boots in DualSense mode and is re-latched when a controller
+// connects and turns out to be something else. Nothing enumerates on USB until
+// that classification happens, so the boot value is never what the host sees.
 constexpr BridgeMode kDefaultBridgeMode = BridgeModeDualSense;
-#endif
 
-BridgeMode active_bridge_mode = kDefaultBridgeMode;
+// One source of truth. The flag in the header is what the SRAM hot paths read;
+// this keeps the enum-typed view in step with it.
+void store_bridge_mode(BridgeMode mode) {
+    g_bridge_mode_stellaris = mode == BridgeModeStellaris;
+}
 
 // Acknowledgement blink. One pulse entering DualSense mode, two entering
 // Stellaris mode, so the switch is legible with no controller connected and no
@@ -61,7 +64,19 @@ void indicator_start(BridgeMode mode) {
 } // namespace
 
 BridgeMode bridge_mode_active() {
-    return active_bridge_mode;
+    return g_bridge_mode_stellaris ? BridgeModeStellaris : BridgeModeDualSense;
+}
+
+void bridge_mode_latch(BridgeMode mode) {
+    if (mode == bridge_mode_active()) {
+        return;
+    }
+    DS5_LOG(
+        "[MODE] Controller classified; bridge mode %u -> %u\n",
+        static_cast<unsigned int>(bridge_mode_active()),
+        static_cast<unsigned int>(mode)
+    );
+    store_bridge_mode(mode);
 }
 
 HostPersonaMode bridge_mode_persona(BridgeMode mode) {
@@ -71,13 +86,13 @@ HostPersonaMode bridge_mode_persona(BridgeMode mode) {
 }
 
 void bridge_mode_reset_to_default() {
-    active_bridge_mode = kDefaultBridgeMode;
+    store_bridge_mode(kDefaultBridgeMode);
     indicator_edges_remaining = 0;
 }
 
 BridgeMode bridge_mode_set_active(BridgeMode mode) {
-    if (mode == active_bridge_mode) {
-        return active_bridge_mode;
+    if (mode == bridge_mode_active()) {
+        return bridge_mode_active();
     }
 
     const HostPersonaMode target_persona = bridge_mode_persona(mode);
@@ -87,12 +102,12 @@ BridgeMode bridge_mode_set_active(BridgeMode mode) {
             static_cast<unsigned int>(mode),
             static_cast<unsigned int>(target_persona)
         );
-        return active_bridge_mode;
+        return bridge_mode_active();
     }
 
     DS5_LOG(
         "[MODE] Switching bridge mode %u -> %u (persona %u)\n",
-        static_cast<unsigned int>(active_bridge_mode),
+        static_cast<unsigned int>(bridge_mode_active()),
         static_cast<unsigned int>(mode),
         static_cast<unsigned int>(target_persona)
     );
@@ -101,20 +116,18 @@ BridgeMode bridge_mode_set_active(BridgeMode mode) {
     //
     // Disconnecting looks harmless but destroys the USB device. The HCI
     // disconnect completes asynchronously and lands in
-    // usb_handle_controller_transport_disconnect() (src/bt.cpp:3566), which
-    // clears usb_reconnect_requested -- cancelling the re-enumeration queued
-    // below -- and clears usb_controller_transport_ready. usb_pm_poll then
-    // sees a not-ready transport, and because wake retention is disabled for
-    // XUSB (src/usb.cpp:100-103) it hard-detaches with tud_disconnect(). The
-    // bridge disappears from the host entirely, and only a DualSense
-    // reconnecting and answering the 0x20 feature probe (src/bt.cpp:4086)
-    // can bring it back.
+    // usb_handle_controller_transport_disconnect(), which clears
+    // usb_reconnect_requested -- cancelling the re-enumeration queued below --
+    // and clears usb_controller_transport_ready. usb_pm_poll then sees a
+    // not-ready transport, and because wake retention is disabled for XUSB it
+    // hard-detaches with tud_disconnect(). The bridge disappears from the host
+    // entirely.
     //
-    // A mode switch is therefore only the persona swap, which is the same
-    // well-trodden path CommandSetHostPersona uses. Swapping to a genuinely
-    // different upstream controller belongs in Phase C, where the teardown
-    // has to be sequenced so it cannot cancel the reconnect.
-    active_bridge_mode = mode;
+    // This path is the post-enumeration swap, and re-enumeration is what makes
+    // it work. The connect-time path does not come through here: it calls
+    // bridge_mode_latch() before the bus is ever attached, so there is nothing
+    // to re-enumerate.
+    store_bridge_mode(mode);
 
     const bool persona_changed = host_persona_active() != target_persona;
     if (persona_changed) {
@@ -122,28 +135,22 @@ BridgeMode bridge_mode_set_active(BridgeMode mode) {
         if (!host_persona_set_active(target_persona)) {
             DS5_LOG("[MODE] Persona activation failed; mode is now %u without re-enumeration\n",
                     static_cast<unsigned int>(mode));
-            indicator_start(active_bridge_mode);
-            return active_bridge_mode;
+            indicator_start(bridge_mode_active());
+            return bridge_mode_active();
         }
         usb_request_reconnect();
     }
 
-    indicator_start(active_bridge_mode);
-    return active_bridge_mode;
+    indicator_start(bridge_mode_active());
+    return bridge_mode_active();
 }
 
 BridgeMode bridge_mode_toggle() {
-#if STELLARIS_ONLY
-    // Single-mode image: there is nothing to toggle to. The BOOTSEL double-press
-    // that used to land here drives the diagnostic dump instead.
-    return active_bridge_mode;
-#else
-    return bridge_mode_set_active(
-        active_bridge_mode == BridgeModeDualSense
-            ? BridgeModeStellaris
-            : BridgeModeDualSense
-    );
-#endif
+    // Mode follows whichever controller connects, so there is nothing for a
+    // manual toggle to decide -- forcing the wrong one would only break decode
+    // until the next reconnect. The BOOTSEL double-press that lands here drives
+    // the diagnostic dump instead.
+    return bridge_mode_active();
 }
 
 void bridge_mode_indicator_poll(uint32_t now_ms) {

@@ -401,24 +401,6 @@ if(ENABLE_COMPANION)
     )
 endif()
 
-# Stellaris-only image: connect to a generic Bluetooth HID gamepad instead of a
-# DualSense and present as an Xbox 360 pad. This is a behaviour gate only -- the
-# source list is identical to the DualSense build, because cmake/relocate_to_ram
-# and cmake/verify_core1_sram both hard-fail on missing objects and symbols.
-option(STELLARIS_ONLY "Build the Stellaris-only Xbox bridge image" OFF)
-if(STELLARIS_ONLY)
-    if(NOT ENABLE_COMPANION)
-        # src/usb_app_drivers.cpp is wrapped in #ifdef ENABLE_COMPANION and is the
-        # only definition of usbd_app_driver_get_cb(), which registers the XUSB
-        # class driver with TinyUSB. Without it xusb360_usb_ready() never goes
-        # true and the bridge sends no input at all.
-        message(FATAL_ERROR "STELLARIS_ONLY requires ENABLE_COMPANION=ON (the XUSB class driver is registered there)")
-    endif()
-    target_compile_definitions(ds5-bridge PRIVATE
-            STELLARIS_ONLY=1
-    )
-    message(STATUS "Stellaris-only build: host persona pinned to Xbox 360, DualSense output paths disabled")
-endif()
 
 # Diagnostics live in one place. Quick presets:
 #   -DDS5_DIAGNOSTICS_PRESET=off    release default
@@ -536,7 +518,6 @@ add_custom_command(TARGET ds5-bridge POST_BUILD
                 "-DELF=$<TARGET_FILE:ds5-bridge>"
                 "-DMIN_HEAP_BYTES=${DS5_MIN_RUNTIME_HEAP_BYTES}"
                 "-DKNOWN_STARTUP_HEAP_BYTES=${DS5_KNOWN_STARTUP_HEAP_BYTES}"
-                "-DSTELLARIS_ONLY=$<BOOL:${STELLARIS_ONLY}>"
                 -P "${CMAKE_SOURCE_DIR}/cmake/verify_core1_sram.cmake"
         COMMENT "Verifying complete firmware hot paths and runtime heap headroom"
         VERBATIM

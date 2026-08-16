@@ -4,7 +4,6 @@
 # resulting UF2 into uf2_builds/ ready to copy onto a BOOTSEL-mounted Pico.
 #
 #   make pico-build               Pico 2 W, Release, companion interface on
-#   make stellaris-build          Stellaris-only image, presents as an Xbox pad
 #   make DIAGNOSTICS=traces       diagnostic build (see docs/diagnostics.md)
 #   make test                     host-side firmware tests (no Pico SDK needed)
 #   make clean                    remove build trees, keep built UF2s
@@ -55,9 +54,6 @@ DIAG_SUFFIX := -$(DIAGNOSTICS)
 endif
 
 PICO2W_BUILD_DIR := $(BUILD_ROOT)/pico2w$(DIAG_SUFFIX)
-# The Stellaris variant needs its own tree: -DSTELLARIS_ONLY changes cached
-# compile definitions, and sharing a tree would silently reuse the wrong image.
-STELLARIS_BUILD_DIR := $(BUILD_ROOT)/pico2w-stellaris$(DIAG_SUFFIX)
 TEST_BUILD_DIR   := build-firmware-tests
 
 # Artifacts are named ds5-bridge-DDMMYY-HHMM.uf2. The stamp is taken inside the
@@ -65,7 +61,6 @@ TEST_BUILD_DIR   := build-firmware-tests
 # produced, not when make started.
 STAMP_FMT := +%d%m%y-%H%M
 LATEST_UF2 := ds5-bridge-latest.uf2
-STELLARIS_LATEST_UF2 := ds5-bridge-stellaris-latest.uf2
 
 CMAKE_FLAGS = -G $(GENERATOR) \
 	-DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
@@ -73,7 +68,7 @@ CMAKE_FLAGS = -G $(GENERATOR) \
 	-DENABLE_COMPANION=ON \
 	-DDS5_DIAGNOSTICS_PRESET=$(DIAGNOSTICS)
 
-.PHONY: pico-build stellaris-build test clean help check-sdk
+.PHONY: pico-build test clean help check-sdk
 
 pico-build: check-sdk | $(OUTPUT_DIR)
 	cmake -S . -B $(PICO2W_BUILD_DIR) $(CMAKE_FLAGS)
@@ -85,20 +80,6 @@ pico-build: check-sdk | $(OUTPUT_DIR)
 	echo "Pico 2 W firmware ready:" && \
 	echo "  $$out" && \
 	echo "  $(OUTPUT_DIR)/$(LATEST_UF2)"
-
-# Stellaris-only image: connects to a generic Bluetooth HID gamepad and presents
-# as an Xbox 360 pad. Built from the same sources as pico-build; only behaviour
-# differs. Flash pico-build's image instead to go back to DualSense.
-stellaris-build: check-sdk | $(OUTPUT_DIR)
-	cmake -S . -B $(STELLARIS_BUILD_DIR) $(CMAKE_FLAGS) -DSTELLARIS_ONLY=ON
-	cmake --build $(STELLARIS_BUILD_DIR) --target ds5-bridge
-	@out="$(OUTPUT_DIR)/ds5-bridge-stellaris-`date $(STAMP_FMT)`.uf2"; \
-	cp $(STELLARIS_BUILD_DIR)/ds5-bridge.uf2 "$$out" && \
-	cp $(STELLARIS_BUILD_DIR)/ds5-bridge.uf2 $(OUTPUT_DIR)/$(STELLARIS_LATEST_UF2) && \
-	echo "" && \
-	echo "Stellaris (Xbox) firmware ready:" && \
-	echo "  $$out" && \
-	echo "  $(OUTPUT_DIR)/$(STELLARIS_LATEST_UF2)"
 
 # Host-side logic and source-guard tests. Deliberately has no SDK dependency so
 # it runs anywhere, including CI containers without the ARM toolchain.
@@ -145,8 +126,7 @@ help:
 	@echo "DS5 Bridge firmware $(FIRMWARE_VERSION)"
 	@echo ""
 	@echo "Targets:"
-	@echo "  pico-build       Build the DualSense image for Pico 2 W (default)"
-	@echo "  stellaris-build  Build the Stellaris-only Xbox image"
+	@echo "  pico-build       Build the firmware for Pico 2 W (default)"
 	@echo "  test             Run host-side firmware tests (no Pico SDK required)"
 	@echo "  clean            Remove build trees, keeping built UF2s"
 	@echo ""

@@ -13,6 +13,7 @@
 #include "dualsense_battery_status.h"
 #include "firmware_log.h"
 #include "host_input.h"
+#include "stellaris_diagnostics.h"
 #include "persona/host_persona.h"
 #include "radial_deadzone.h"
 #include "pico/critical_section.h"
@@ -899,11 +900,14 @@ void restore_defaults() {
     bt_set_idle_disconnect_timeout_minutes(15);
     usb_set_suspend_disconnect_enabled(true);
     usb_set_hid_polling_rate_mode(2);
-    // Bridge mode is not persisted; the persona reset below is what actually
-    // re-enumerates, so this only clears the mode flag. In a Stellaris-only
-    // image the boot default is Stellaris/XUSB, so this resets to Xbox instead
-    // of dragging the persona back to DualSense.
-    bridge_mode_reset_to_default();
+    // Bridge mode is deliberately NOT reset here. It describes the controller
+    // physically on the link, not a user setting: clearing it mid-session would
+    // send a connected third-party pad's reports down the DualSense decode path,
+    // where the 0x31 filter drops every one of them, and would simultaneously
+    // un-gate DualSense output at a pad that cannot parse it. Only a real
+    // disconnect resets the mode. The persona below still returns to whatever
+    // the connected controller implies, which is what "restore defaults" means
+    // for a user who changed it in the app.
     const HostPersonaMode default_persona = bridge_mode_persona(bridge_mode_active());
     if (host_persona_active() != default_persona) {
         host_input_prepare_persona_switch();
@@ -1630,6 +1634,12 @@ void mute_keyboard_loop() {
 
     const uint8_t keyboard_hid_instance = host_persona_keyboard_hid_instance();
     if (!tud_hid_n_ready(keyboard_hid_instance)) {
+        return;
+    }
+    // The diagnostic dump owns the keyboard while it runs. mute_keyboard_pending
+    // is left set, so the chord fires as soon as the dump finishes rather than
+    // being dropped.
+    if (stellaris_diagnostics_active()) {
         return;
     }
 

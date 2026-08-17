@@ -71,6 +71,11 @@ uint8_t bt_send_raw_hid_output(uint8_t const *data, uint16_t len);
 // no-op outside Stellaris mode. Intensity is currently on/off: only the
 // zero/non-zero distinction is honoured.
 void bt_stellaris_set_rumble(uint8_t left, uint8_t right);
+
+// Re-drives a rumble frame that could not be sent because the L2CAP channel had
+// no credit. The host only reports rumble on change, so without this a dropped
+// stop frame would leave the motors running indefinitely.
+void bt_stellaris_rumble_retry_loop();
 bool bt_request_scan();
 bool bt_forget_pairings();
 bool bt_forget_pairing(uint8_t address[6]);

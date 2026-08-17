@@ -211,6 +211,17 @@ void note_seen_report_id(uint8_t id) {
     }
 }
 
+// A layout that came from a verified table entry or the pad's own descriptor is
+// authoritative; only the generic guess may re-adopt its report ID.
+bool layout_from_known_or_descriptor() {
+    return layout_source != HidLayoutSource::Generic;
+}
+
+// How many consecutive rejected reports before the generic layout concludes it
+// latched onto the wrong first byte.
+constexpr uint8_t kReportIdReadoptThreshold = 8;
+uint8_t consecutive_report_id_rejections = 0;
+
 // Shortest report that could carry the four axes the fallback expects. Guards
 // against latching the fallback onto a short consumer-control or battery report
 // that a pad may interleave with its gamepad reports.
@@ -237,6 +248,21 @@ uint32_t extract_bits(
         }
     }
     return result;
+}
+
+// Whether a field actually lies inside the report that arrived.
+//
+// Presence alone is not enough. The built-in fallback layout declares trigger
+// axes at fixed offsets, and on a pad whose report is shorter than that the
+// extract would quietly read zeros -- which reads as "analog trigger at rest"
+// and suppresses the digital fallback, leaving L2/R2 permanently dead.
+bool field_in_report(HidFieldLocation const &field, uint16_t payload_len) {
+    if (!field.present) {
+        return false;
+    }
+    const uint32_t end_bit =
+        static_cast<uint32_t>(field.bit_offset) + static_cast<uint32_t>(field.bit_size);
+    return end_bit <= static_cast<uint32_t>(payload_len) * 8u;
 }
 
 // Sign-extends a raw field when its declared logical range goes negative.
@@ -304,6 +330,7 @@ void generic_hid_reset() {
     last_report_len = 0;
     last_button_mask = 0;
     last_hat_value = kHidHatCentred;
+    consecutive_report_id_rejections = 0;
     seen_report_id_count = 0;
     byte_activity_width = 0;
     sampled_reports = 0;
@@ -317,6 +344,12 @@ bool generic_hid_apply_descriptor_layout(HidGamepadLayout const &layout) {
     layout_source = HidLayoutSource::Descriptor;
     layout_name = "REPORT DESCRIPTOR";
     layout_locked = true;
+    // A descriptor says where the buttons are, never what they are called, so it
+    // carries no button-map opinion. Without this reset the map left behind by a
+    // previously matched known layout would survive, and the naming would depend
+    // on whether the first input report or the SDP result arrived first.
+    active_button_map = kAndroidButtonMap;
+    active_button_map_count = kAndroidButtonMapCount;
     return true;
 }
 
@@ -427,8 +460,21 @@ bool generic_hid_decode_input_report(
     uint16_t payload_len = len;
     if (active_layout.uses_report_id) {
         if (report[0] != active_layout.report_id) {
+            // A pad that sends no report ID at all puts live data in byte 0, so
+            // the adopted "ID" changes every frame and every report is rejected
+            // -- input freezes completely. Rather than trust the first frame
+            // forever, re-adopt after a run of rejections. Bounded so a pad that
+            // genuinely interleaves several report IDs still settles instead of
+            // thrashing between them.
+            if (!layout_from_known_or_descriptor()
+                && ++consecutive_report_id_rejections >= kReportIdReadoptThreshold
+                && len >= kMinAdoptableReportLen) {
+                active_layout.report_id = report[0];
+                consecutive_report_id_rejections = 0;
+            }
             return false;
         }
+        consecutive_report_id_rejections = 0;
         payload = report + 1;
         payload_len = static_cast<uint16_t>(len - 1);
     }
@@ -470,14 +516,17 @@ bool generic_hid_decode_input_report(
         right_stick_uses_z ? active_layout.rx : active_layout.z;
     HidFieldLocation const &right_trigger =
         right_stick_uses_z ? active_layout.ry : active_layout.rz;
+    // Gated on the field fitting the report, not merely being declared: a
+    // declared-but-absent trigger would extract as zero and still suppress the
+    // digital fallback below, which is indistinguishable from a dead trigger.
     bool analog_triggers = false;
-    if (left_trigger.present) {
+    if (field_in_report(left_trigger, payload_len)) {
         state.left_trigger = scale_axis(
             extract_bits(payload, payload_len, left_trigger.bit_offset, left_trigger.bit_size),
             left_trigger);
         analog_triggers = true;
     }
-    if (right_trigger.present) {
+    if (field_in_report(right_trigger, payload_len)) {
         state.right_trigger = scale_axis(
             extract_bits(payload, payload_len, right_trigger.bit_offset, right_trigger.bit_size),
             right_trigger);

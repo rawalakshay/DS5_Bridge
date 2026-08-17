@@ -498,7 +498,26 @@ void build_guided_result(bool timed_out, uint32_t mask, uint16_t hat) {
     append("\n");
 }
 
+// Sends the all-zero keyboard report if a key is currently held.
+//
+// Abandoning a run mid-keystroke otherwise leaves that key latched on the host:
+// under a native persona wake retention keeps the USB device enumerated across a
+// controller disconnect, so the host never sees an implicit release and the
+// character auto-repeats indefinitely.
+void release_held_key() {
+    if (!key_is_down) {
+        return;
+    }
+    uint8_t report[8]{};
+    (void)tud_hid_n_report(host_persona_keyboard_hid_instance(), 0, report, sizeof(report));
+    key_is_down = false;
+}
+
 } // namespace
+
+bool stellaris_diagnostics_active() {
+    return state != DumpState::Idle;
+}
 
 void stellaris_diagnostics_request_dump() {
     // Deliberately not gated on bridge mode. An earlier version refused to run
@@ -525,6 +544,7 @@ void stellaris_diagnostics_request_dump() {
     if (state == DumpState::RumbleProbe) {
         (void)bt_send_raw_hid_output(
             kRumbleCandidates[rumble_index].off, kRumbleCandidates[rumble_index].len);
+        release_held_key();
         state = DumpState::Idle;
         text_len = 0;
         text_cursor = 0;
@@ -544,6 +564,7 @@ void stellaris_diagnostics_request_dump() {
 }
 
 void stellaris_diagnostics_reset() {
+    release_held_key();
     state = DumpState::Idle;
     text_len = 0;
     text_cursor = 0;
@@ -618,7 +639,13 @@ void stellaris_diagnostics_poll(uint32_t now_ms) {
             if (static_cast<int32_t>(now_ms - rumble_until_ms) < 0) {
                 return;
             }
-            (void)bt_send_raw_hid_output(candidate.off, candidate.len);
+            // Same treatment as the ON frame: a busy channel means the stop
+            // never went out, so advancing would leave the motors running and
+            // blame the next candidate for it.
+            if (bt_send_raw_hid_output(candidate.off, candidate.len) == kBtRawOutputBusy) {
+                next_event_ms = now_ms + 10;
+                return;
+            }
             rumble_driving = false;
             rumble_index++;
             if (rumble_index >= kRumbleCandidateCount) {
@@ -634,6 +661,16 @@ void stellaris_diagnostics_poll(uint32_t now_ms) {
         // the run into WaitPress with nothing on screen, so step 1 would be
         // silently unprompted.
         if (state == DumpState::TypingHeader) {
+            // The guided capture reads the generic decoder, which the DualSense
+            // path never writes. Running it there would sit through all 18 steps
+            // at the 15 s timeout apiece -- about four and a half minutes of
+            // typing into the user's editor for no information. The header above
+            // is the part worth having in either mode, so it always prints; only
+            // the capture is conditional.
+            if (!bridge_mode_is_stellaris()) {
+                state = DumpState::Idle;
+                return;
+            }
             state = DumpState::Guided;
             guided_index = 0;
             guided_phase = GuidedPhase::Prompt;
@@ -650,8 +687,13 @@ void stellaris_diagnostics_poll(uint32_t now_ms) {
             case GuidedPhase::Prompt:
                 // Prompt has finished typing. Require the pad to be at rest
                 // first, so a control still held from the previous step is not
-                // read as the answer to this one.
-                if (control_down) {
+                // read as the answer to this one -- but bounded, because a
+                // mismatched layout can decode a bit as permanently held, and
+                // an unbounded wait here parks the whole run at step 1.
+                if (guided_deadline_ms == 0) {
+                    guided_deadline_ms = now_ms + kGuidedStepTimeoutMs;
+                }
+                if (control_down && static_cast<int32_t>(now_ms - guided_deadline_ms) < 0) {
                     return;
                 }
                 guided_phase = GuidedPhase::WaitPress;
@@ -672,12 +714,19 @@ void stellaris_diagnostics_poll(uint32_t now_ms) {
 
             case GuidedPhase::Result:
                 guided_phase = GuidedPhase::WaitRelease;
+                guided_deadline_ms = 0;
                 return;
 
             case GuidedPhase::WaitRelease:
-                if (control_down) {
+                // Bounded for the same reason as Prompt: a control that never
+                // reads as released must cost one step, not the whole run.
+                if (guided_deadline_ms == 0) {
+                    guided_deadline_ms = now_ms + kGuidedStepTimeoutMs;
+                }
+                if (control_down && static_cast<int32_t>(now_ms - guided_deadline_ms) < 0) {
                     return;
                 }
+                guided_deadline_ms = 0;
                 guided_index++;
                 if (guided_index >= kGuidedStepCount) {
                     append("GUIDED CAPTURE DONE\n");

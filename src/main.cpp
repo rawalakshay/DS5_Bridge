@@ -882,6 +882,7 @@ int main() {
         });
         RUN_MAIN_PHASE(WatchdogMainLoopPhase::FeaturePrefetch, {
             bt_feature_prefetch_loop();
+            bt_stellaris_rumble_retry_loop();
         });
         RUN_MAIN_PHASE(WatchdogMainLoopPhase::OutputRetry, {
             bt_output_retry_loop();

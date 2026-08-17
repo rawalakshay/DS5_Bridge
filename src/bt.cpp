@@ -43,6 +43,7 @@
 #include "bridge_latency.h"
 #include "bridge_mode.h"
 #include "generic_hid_input_decoder.h"
+#include "host_input.h"
 #include "hid_report_descriptor.h"
 #include "stellaris_diagnostics.h"
 #include "switch_rumble.h"
@@ -435,6 +436,13 @@ static bool controller_type_check_pending = false;
 // 15 minute idle disconnect fires. On expiry the pad is published as a generic
 // HID gamepad, which is the correct reading of "did not answer a Sony probe".
 static uint32_t controller_type_deadline_us = 0;
+// True once this controller has been classified and handed to USB. Guards
+// against re-running detection on an already-live session: an L2CAP channel
+// close/reopen re-enters finish_hid_session_if_ready(), and re-probing there
+// would re-arm the deadline while get_feature_data() suppresses the 0x20
+// request as already cached -- so no answer ever arrives and the timeout
+// demotes a working DualSense to a generic pad.
+static bool controller_published = false;
 static bool hid_control_ready = false;
 static bool hid_interrupt_ready = false;
 static HidConnectionInitiator hid_connection_initiator = HidConnectionInitiator::None;
@@ -2441,16 +2449,62 @@ uint8_t bt_send_raw_hid_output(uint8_t const *data, uint16_t len) {
     return status;
 }
 
+// Rumble delivery state. File scope rather than function-local statics so the
+// disconnect teardown can clear it: left in place, the dedupe below would
+// compare a newly connected pad against the previous pad's last delivered
+// values and swallow an identical request.
+static uint8_t rumble_last_left = 0;
+static uint8_t rumble_last_right = 0;
+static bool rumble_state_known = false;
+static uint8_t rumble_sequence = 0;
+static uint32_t rumble_last_sent_us = 0;
+// A send can fail because the L2CAP channel has no credit right now. The host
+// only tells us about rumble when it changes, so a dropped frame is never
+// re-offered -- and a dropped STOP frame leaves the motors running with nothing
+// to turn them off. Hold the wanted value and re-drive it from the superloop.
+static bool rumble_retry_pending = false;
+static uint8_t rumble_retry_left = 0;
+static uint8_t rumble_retry_right = 0;
+
+static bool bt_stellaris_send_rumble_frame(uint8_t left, uint8_t right, uint32_t now) {
+    uint8_t frame[kSwitchRumbleFrameBytes];
+    switch_rumble_encode_frame(frame, rumble_sequence, left, right);
+    if (bt_send_raw_hid_output(frame, sizeof(frame)) != kBtRawOutputSent) {
+        rumble_retry_pending = true;
+        rumble_retry_left = left;
+        rumble_retry_right = right;
+        return false;
+    }
+    rumble_sequence++;
+    rumble_last_left = left;
+    rumble_last_right = right;
+    rumble_last_sent_us = now;
+    rumble_state_known = true;
+    rumble_retry_pending = false;
+    return true;
+}
+
+void bt_stellaris_reset_rumble_state() {
+    rumble_last_left = 0;
+    rumble_last_right = 0;
+    rumble_state_known = false;
+    rumble_last_sent_us = 0;
+    rumble_retry_pending = false;
+    rumble_retry_left = 0;
+    rumble_retry_right = 0;
+}
+
+void bt_stellaris_rumble_retry_loop() {
+    if (!rumble_retry_pending || !bridge_mode_is_stellaris() || hid_interrupt_cid == 0) {
+        return;
+    }
+    (void)bt_stellaris_send_rumble_frame(rumble_retry_left, rumble_retry_right, time_us_32());
+}
+
 void bt_stellaris_set_rumble(uint8_t left, uint8_t right) {
     if (!bridge_mode_is_stellaris()) {
         return;
     }
-
-    static uint8_t last_left = 0;
-    static uint8_t last_right = 0;
-    static bool rumble_state_known = false;
-    static uint8_t rumble_sequence = 0;
-    static uint32_t last_sent_us = 0;
 
     // Games update rumble every frame. Repeating frames at that rate would
     // flood the same L2CAP interrupt lane the input reports arrive on, so
@@ -2459,29 +2513,18 @@ void bt_stellaris_set_rumble(uint8_t left, uint8_t right) {
     constexpr uint32_t kMinResendIntervalUs = 40000;
 
     const bool stopping = (left | right) == 0;
-    const bool changed = !rumble_state_known || left != last_left || right != last_right;
-    if (!changed) {
+    const bool changed =
+        !rumble_state_known || left != rumble_last_left || right != rumble_last_right;
+    if (!changed && !rumble_retry_pending) {
         return;
     }
     const uint32_t now = time_us_32();
-    if (!stopping && rumble_state_known
-        && static_cast<uint32_t>(now - last_sent_us) < kMinResendIntervalUs) {
+    if (!stopping && rumble_state_known && !rumble_retry_pending
+        && static_cast<uint32_t>(now - rumble_last_sent_us) < kMinResendIntervalUs) {
         return;
     }
 
-    uint8_t frame[kSwitchRumbleFrameBytes];
-    switch_rumble_encode_frame(frame, rumble_sequence, left, right);
-
-    if (bt_send_raw_hid_output(frame, sizeof(frame)) != kBtRawOutputSent) {
-        // Leave the state unknown so the next call retries rather than
-        // believing a frame that never left.
-        return;
-    }
-    rumble_sequence++;
-    last_left = left;
-    last_right = right;
-    last_sent_us = now;
-    rumble_state_known = true;
+    (void)bt_stellaris_send_rumble_frame(left, right, now);
 }
 
 bool bt_request_scan() {
@@ -2825,6 +2868,10 @@ static void stellaris_sdp_query_handler(
             const uint16_t descriptor_len = hid_report_descriptor_length();
             if (
                 descriptor_len > 0
+                // A descriptor larger than the buffer aborts the scan state
+                // machine mid-stream. Parsing what was captured would apply a
+                // layout built from half a descriptor and report it as OK.
+                && hid_descriptor_scan_state == HidDescriptorScanComplete
                 && hid_report_descriptor_parse()
                 && generic_hid_apply_descriptor_layout(hid_report_descriptor_layout())
             ) {
@@ -2922,19 +2969,46 @@ static void publish_controller_as(ControllerType type) {
     controller_type_check_pending = false;
     controller_type_deadline_us = 0;
 
+    controller_published = true;
     const bool generic = type == ControllerTypeGenericHid;
     bridge_mode_latch(generic ? BridgeModeStellaris : BridgeModeDualSense);
 
-    const HostPersonaMode target_persona = generic
-        ? HostPersonaModeXusb360
-        : HostPersonaModeDualSense;
-    if (host_persona_active() != target_persona) {
+    // Only change the persona when the active one cannot represent this
+    // controller. A generic pad has to be XUSB -- that is the only encoder fed
+    // by the generic decoder. A Sony pad works under any of the native
+    // personas, so a DS4 or Edge identity the user picked in the companion app
+    // is left alone; forcing DualSense here would silently revert their choice
+    // on every reconnect, which classification never did before the merge.
+    const HostPersonaMode active_persona = host_persona_active();
+    const bool persona_fits = generic
+        ? active_persona == HostPersonaModeXusb360
+        : active_persona != HostPersonaModeXusb360;
+
+    if (!persona_fits) {
+        const HostPersonaMode target_persona = generic
+            ? HostPersonaModeXusb360
+            : HostPersonaModeDualSense;
+
+        // The bus is normally detached at this point, so swapping the persona
+        // costs nothing. But wake retention keeps a native persona enumerated
+        // across a controller disconnect, so the second controller of a session
+        // can arrive with the host still holding the previous descriptors. Left
+        // alone that publishes XUSB behind a DualSense configuration: the XUSB
+        // interface never enumerates, xusb360_usb_ready() stays false, and no
+        // input reaches the host until the cable is replugged.
+        const bool bus_still_attached = usb_controller_transport_retained_for_wake();
+
+        if (bus_still_attached) {
+            host_input_prepare_persona_switch();
+        }
         if (!host_persona_set_active(target_persona)) {
             DS5_LOG(
                 "[L2CAP] Persona %u unsupported; publishing with %u\n",
                 static_cast<unsigned int>(target_persona),
                 static_cast<unsigned int>(host_persona_active())
             );
+        } else if (bus_still_attached) {
+            usb_request_reconnect();
         }
     }
 
@@ -3177,10 +3251,17 @@ void bt_feature_prefetch_loop() {
     // 0x20 feature report nor a NAK would otherwise leave the check pending
     // forever, and since the USB attach is downstream of classification the
     // bridge would never appear on the host at all.
+    // Gated on the control channel specifically: the probe answer can only ever
+    // arrive there (see the hid_control_cid branch in l2cap_packet_handler_cold),
+    // so firing this while that channel is closed or the ACL is tearing down
+    // would demote a controller that never had the chance to answer. A
+    // control-channel-only close leaves hid_interrupt_cid non-zero, which is why
+    // checking the interrupt channel alone was not enough.
     if (
         controller_type_check_pending
         && controller_type_deadline_us != 0
-        && hid_interrupt_cid != 0
+        && connection_phase == BtConnectionPhase::Ready
+        && hid_control_cid != 0
         && bt_time_reached(time_us_32(), controller_type_deadline_us)
     ) {
         DS5_LOG("[L2CAP] Controller type probe timed out; treating as generic HID gamepad\n");
@@ -4017,6 +4098,8 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
             controller_type = ControllerTypeUnknown;
             controller_type_check_pending = false;
             controller_type_deadline_us = 0;
+            controller_published = false;
+            bt_stellaris_reset_rumble_state();
             // The next controller is classified from scratch, so drop every
             // per-pad decision with the link. Bridge mode returns to the
             // DualSense default; a generic pad re-latches it on connect.
@@ -4364,6 +4447,27 @@ static void finish_hid_session_if_ready() {
     inactive_time = now_us;
     arm_signal_strength_idle_epoch(now_us);
 
+    if (controller_published) {
+        // An L2CAP channel closed and reopened on a session that is already
+        // classified and live on USB. Do not re-probe: get_feature_data()
+        // suppresses a GET_REPORT for a report id already in feature_data, and
+        // 0x20 is not in its requires-fresh set, so the probe would never go out
+        // and the re-armed deadline would demote a working DualSense to a
+        // generic pad. Just restore the output state the pad lost with the
+        // channel.
+        DS5_LOG("[L2CAP] HID channels recovered; keeping existing controller type\n");
+        if (!bridge_mode_is_stellaris()) {
+            reset_lightbar_setup();
+            bt_set_lightbar_color(
+                saved_lightbar_red,
+                saved_lightbar_green,
+                saved_lightbar_blue,
+                saved_lightbar_brightness
+            );
+        }
+        return;
+    }
+
     // Probe for a DualSense. The type is not known yet, so nothing
     // DualSense-specific may be emitted here -- the 0x20 GET_REPORT is the one
     // exception, and it is safe because a third-party pad simply NAKs or
@@ -4372,6 +4476,12 @@ static void finish_hid_session_if_ready() {
     DS5_LOG("Init DualSense\n");
     init_feature();
     controller_type_deadline_us = time_us_32() + CONTROLLER_TYPE_DETECT_TIMEOUT_US;
+    if (controller_type_deadline_us == 0) {
+        // 0 doubles as the disarmed sentinel, and the sum above can land on it
+        // once per 32-bit wrap. One microsecond of skew is cheaper than a
+        // silently disarmed fallback.
+        controller_type_deadline_us = 1;
+    }
 }
 
 static __attribute__((optimize("O2"))) void __not_in_flash_func(handle_l2cap_can_send_now)(uint8_t *packet) {

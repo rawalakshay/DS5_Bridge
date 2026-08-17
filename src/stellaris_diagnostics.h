@@ -31,4 +31,10 @@ void stellaris_diagnostics_poll(uint32_t now_ms);
 // once a pad came back.
 void stellaris_diagnostics_reset();
 
+// True while a dump is typing. Both this and the companion mute-key chord drive
+// the same keyboard HID interface from the same superloop, each with its own
+// key-down flag, so one must stand aside or an interleaved send clobbers the
+// other's held key on the host.
+bool stellaris_diagnostics_active();
+
 #endif // DS5_BRIDGE_STELLARIS_DIAGNOSTICS_H

@@ -36,6 +36,12 @@ importers:
       '@vitejs/plugin-react':
         specifier: ^5.1.1
         version: 5.2.0(vite@7.3.6(@types/node@25.9.5)(jiti@2.7.0))
+      app-builder-lib:
+        specifier: 26.15.3
+        version: 26.15.3(dmg-builder@26.15.3)(electron-builder-squirrel-windows@26.15.3)
+      builder-util-runtime:
+        specifier: 9.7.0
+        version: 9.7.0
       electron:
         specifier: ^39.8.10
         version: 39.8.10
@@ -3229,13 +3235,13 @@ snapshots:
 
   node-abi@4.33.0:
     dependencies:
-      semver: 7.7.4
+      semver: 7.8.5
 
   node-addon-api@8.9.2: {}
 
   node-api-version@0.2.1:
     dependencies:
-      semver: 7.7.4
+      semver: 7.8.5
 
   node-gyp@12.4.0:
     dependencies:
@@ -3244,7 +3250,7 @@ snapshots:
       graceful-fs: 4.2.11
       nopt: 9.0.0
       proc-log: 6.1.0
-      semver: 7.7.4
+      semver: 7.8.5
       tar: 7.5.22
       tinyglobby: 0.2.17
       undici: 6.28.0

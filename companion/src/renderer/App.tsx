@@ -68,7 +68,6 @@ import {
   IconX as X
 } from '@tabler/icons-react';
 import playStationLogoUrl from '../../../assets/brand/playstation-logo.svg';
-import controllerImage from '../../../assets/controllers/dualsense-edge-front.svg';
 import remappingEdgeLayoutImage from '../../../assets/controllers/dualsense-edge-remapping-layout.svg';
 import remappingLayoutImage from '../../../assets/controllers/dualsense-remapping-layout.svg';
 import circleGlyphUrl from '../../../assets/glyphs/ps5-buttons-outline-white/svg/Circle.svg';
@@ -144,6 +143,7 @@ import type {
   TriggerTestTarget
 } from '../shared/protocol';
 import type { AudioHapticsSession, BridgeSnapshot, UiScalePercent, UiThemePreset } from '../shared/types';
+import { controllerArtUrl } from './controller-art';
 import {
   buildDevicesModel,
   controllerDeviceCachesEqual,
@@ -6854,7 +6854,11 @@ export function App() {
               selectControlTab('devices');
             }}
           >
-            <img className="controller-art" src={controllerImage} alt="" />
+            <img
+              className="controller-art"
+              src={controllerArtUrl(sidebarControllerCard?.controllerType ?? liveControllerType)}
+              alt=""
+            />
             <div className="status-copy">
               <div className="connection-row">
                 <strong>{sidebarDeviceTitle}</strong>

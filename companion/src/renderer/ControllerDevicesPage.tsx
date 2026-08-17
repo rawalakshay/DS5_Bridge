@@ -6,7 +6,7 @@ import {
   IconTrash as Trash2,
   IconX as X
 } from '@tabler/icons-react';
-import controllerImage from '../../../assets/controllers/dualsense-edge-front.svg';
+import { controllerArtUrl } from './controller-art';
 import type { DevicesModel } from './controller-devices';
 
 export interface ControllerDeviceRenameDialog {
@@ -176,7 +176,7 @@ export function ControllerDevicesPage({
                     </div>
                   </div>
                   <div className="trusted-device-art" aria-hidden="true">
-                    <img src={controllerImage} alt="" />
+                    <img src={controllerArtUrl(device.controllerType)} alt="" />
                   </div>
                 </section>
               ))

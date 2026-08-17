@@ -119,6 +119,8 @@
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.1.1",
+    "app-builder-lib": "26.15.3",
+    "builder-util-runtime": "9.7.0",
     "electron": "^39.8.10",
     "electron-builder": "^26.8.1",
     "lucide-react": "^0.561.0",

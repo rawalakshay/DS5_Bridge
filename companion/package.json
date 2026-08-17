@@ -9,6 +9,7 @@
   "main": "dist/main/main/main.js",
   "scripts": {
     "dev": "npm run build && electron .",
+    "dev:ui": "npm run build:app && electron .",
     "typecheck": "tsc -p tsconfig.main.json --noEmit && tsc -p tsconfig.json --noEmit",
     "build:audio-helper": "node scripts/run-dotnet-sdk.mjs publish native/AudioHelper/AudioHelper.csproj -c Release -r win-x64 --self-contained true -o native/AudioHelper/bin/publish/win-x64",
     "build:firmware-tools": "powershell -NoProfile -ExecutionPolicy Bypass -File ../tools/build-pico-universal-flash-nuke.ps1",

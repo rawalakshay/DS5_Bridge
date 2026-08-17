@@ -454,7 +454,7 @@ export const MUTE_KEYBOARD_MODIFIER_MASK = 0x0f;
 
 export interface BridgeStatusPayload {
   controllerConnected: boolean;
-  controllerType: 'unknown' | 'dualsense' | 'dualsense-edge';
+  controllerType: 'unknown' | 'dualsense' | 'dualsense-edge' | 'generic-hid';
   batteryPercent: number | null;
   rawPowerState: number;
   audioRecent: boolean;
@@ -771,6 +771,10 @@ function readAscii(report: ArrayLike<number>, offset: number, length: number): s
 function controllerType(value: number): BridgeStatusPayload['controllerType'] {
   if (value === 1) return 'dualsense';
   if (value === 2) return 'dualsense-edge';
+  // ControllerTypeGenericHid (bt.h). Any third-party Bluetooth HID gamepad;
+  // the bridge presents it to the host as an Xbox 360 pad. Firmware before
+  // generic-pad support never emitted 3, so this needs no protocol bump.
+  if (value === 3) return 'generic-hid';
   return 'unknown';
 }
 

@@ -2,6 +2,13 @@ import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 
+// The AudioHelper is Windows-only (WASAPI + WinUSB), so on macOS/Linux the SDK is
+// usually absent and building it would be pointless anyway. Skip instead of failing,
+// so `npm run dev` still gets to the Electron app. Set DS5_BRIDGE_REQUIRE_DOTNET=1 to
+// force the original hard failure (e.g. cross-publishing from a non-Windows machine).
+const requireDotnet =
+  process.platform === 'win32' || process.env.DS5_BRIDGE_REQUIRE_DOTNET === '1';
+
 const executableName = process.platform === 'win32' ? 'dotnet.exe' : 'dotnet';
 const configuredRoots = [
   process.env.DOTNET_ROOT,
@@ -32,6 +39,13 @@ for (const candidate of uniqueCandidates) {
 }
 
 if (!selected) {
+  if (!requireDotnet) {
+    console.warn(
+      `Skipping .NET step on ${process.platform}: no SDK found, and the AudioHelper is Windows-only. ` +
+        'Set DS5_BRIDGE_REQUIRE_DOTNET=1 to make this a hard failure.'
+    );
+    process.exit(0);
+  }
   console.error(
     'No .NET SDK was found. Install an SDK or set DOTNET_ROOT to a directory containing an SDK-enabled dotnet executable.'
   );

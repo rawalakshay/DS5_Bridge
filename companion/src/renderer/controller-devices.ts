@@ -90,7 +90,10 @@ function nullableBoolean(value: unknown): boolean | null {
 }
 
 function isControllerDeviceType(value: unknown): value is ControllerDeviceType {
-  return value === 'unknown' || value === 'dualsense' || value === 'dualsense-edge';
+  return value === 'unknown'
+    || value === 'dualsense'
+    || value === 'dualsense-edge'
+    || value === 'generic-hid';
 }
 
 export function controllerDeviceName(
@@ -103,6 +106,7 @@ export function controllerDeviceName(
   if (normalized && !stockEdgeName && !stockDualSenseName) return normalized;
   if (type === 'dualsense-edge' || stockEdgeName) return 'DualSense Edge';
   if (type === 'dualsense' || stockDualSenseName) return 'DualSense';
+  if (type === 'generic-hid') return 'Generic Controller';
   return normalized ?? 'Controller';
 }
 

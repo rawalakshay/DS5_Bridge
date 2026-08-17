@@ -103,6 +103,31 @@ describe('controller device cache', () => {
     });
   });
 
+  it('names generic pads by their advertised name and keeps their real USB identity', () => {
+    // A third-party pad reports its own Bluetooth name, so that wins; only a
+    // nameless one falls back to the generic label.
+    expect(controllerDeviceName('generic-hid', 'Stellaris')).toBe('Stellaris');
+    expect(controllerDeviceName('generic-hid', null)).toBe('Generic Controller');
+
+    // controllerKnownVendorProduct has no entry for a generic pad, so the
+    // SDP-sourced identity must survive rather than being blanked out.
+    expect(cachedControllerDeviceFromSnapshot(
+      status('generic-hid', 55),
+      identity('11:22:33:44:55:66', {
+        controllerName: 'Stellaris',
+        vendorId: 0x2dc8,
+        productId: 0x3106
+      }),
+      100
+    )).toMatchObject({
+      controllerType: 'generic-hid',
+      controllerName: 'Stellaris',
+      vendorId: 0x2dc8,
+      productId: 0x3106,
+      batteryPercent: 55
+    });
+  });
+
   it('keeps only unique address-backed history up to the cache limit', () => {
     const devices = Array.from({ length: CONTROLLER_DEVICE_CACHE_LIMIT + 2 }, (_, index) => (
       device(`AA:BB:CC:DD:EE:${index.toString(16).padStart(2, '0').toUpperCase()}`, index)

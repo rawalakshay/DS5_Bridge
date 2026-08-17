@@ -179,6 +179,25 @@ describe('companion protocol', () => {
     expect(status.supportedHostPersonaModes).toEqual(['dualsense', 'xbox', 'ds4']);
   });
 
+  it('parses a generic HID controller type', () => {
+    const report = baseReport(REPORT_ID.STATUS);
+    report[7] = 1;
+    report[8] = 3;
+
+    const status = parseStatusReport(report);
+    expect(status.controllerConnected).toBe(true);
+    expect(status.controllerType).toBe('generic-hid');
+  });
+
+  it('falls back to an unknown controller type for unrecognised values', () => {
+    const report = baseReport(REPORT_ID.STATUS);
+    report[7] = 1;
+    report[8] = 9;
+
+    const status = parseStatusReport(report);
+    expect(status.controllerType).toBe('unknown');
+  });
+
   it('parses chord mute button mode', () => {
     const report = baseReport(REPORT_ID.STATUS);
     report[60] = 3;

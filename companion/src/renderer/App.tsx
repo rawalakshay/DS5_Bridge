@@ -760,6 +760,10 @@ const REMAP_EDGE_LINE_POINTS: Record<DualSenseEdgeRemapButtonId, [[number, numbe
   lfn: [[227.5, 368.88], [227.68, 296.98]],
   rfn: [[370.46, 368.88], [370.64, 296.98]]
 };
+// Shown wherever a page's controls are inert because the connected pad is a
+// third-party one. The bridge presents it to the host as an Xbox 360 device and
+// sends nothing back to it, so these features have no hardware to drive.
+const GENERIC_HID_UNSUPPORTED_NOTE = 'Not available on a generic controller — this feature needs a DualSense.';
 const CONTROL_TAB_DEFINITIONS: Record<SidebarControlTab, ControlTabDefinition> = {
   overview: { id: 'overview', label: 'Overview', Icon: IconLayoutDashboard },
   devices: { id: 'devices', label: 'Devices', Icon: IconBluetooth },
@@ -1979,6 +1983,7 @@ function isExternalPowerState(rawPowerState: number | undefined): boolean {
 function controllerName(type: string | undefined): string {
   if (type === 'dualsense-edge') return 'DualSense Edge';
   if (type === 'dualsense') return 'DualSense';
+  if (type === 'generic-hid') return 'Generic Controller';
   return 'Controller';
 }
 
@@ -3184,6 +3189,13 @@ export function App() {
     snapshot?.status
   ]);
   const liveControllerType = snapshot?.status?.controllerType;
+  // A third-party pad reaches the host as an Xbox 360 device, and the firmware
+  // cuts every DualSense-bound path behind bridge_mode_is_stellaris(): the
+  // output funnels and bt_power_off_controller in bt.cpp, the audio pipeline in
+  // audio.cpp, and the companion report rewriter that owns remap + deadzones
+  // (see the on_bt_data comment in main.cpp). Those controls are inert here, so
+  // report them unsupported rather than letting the UI offer dead switches.
+  const genericHidController = controllerConnected && liveControllerType === 'generic-hid';
   const remapControllerType = snapshot?.status?.controllerConnected && liveControllerType && liveControllerType !== 'unknown'
     ? liveControllerType
     : lastRemapControllerType;
@@ -3808,18 +3820,18 @@ export function App() {
         ? 'bad'
         : 'idle';
   const lastAck = snapshot?.diagnostics.lastAck;
-  const speakerVolumeSupported = Boolean(snapshot?.status?.firmwareFlags.speakerVolumeControl);
-  const lightbarSupported = Boolean(snapshot?.status?.firmwareFlags.lightbarControl);
-  const lightbarOverrideSupported = Boolean(snapshot?.status?.firmwareFlags.lightbarOverrideControl);
-  const muteButtonActionsSupported = Boolean(snapshot?.status?.firmwareFlags.muteButtonActions);
-  const adaptiveTriggersSupported = Boolean(snapshot?.status?.firmwareFlags.adaptiveTriggersControl);
+  const speakerVolumeSupported = Boolean(snapshot?.status?.firmwareFlags.speakerVolumeControl) && !genericHidController;
+  const lightbarSupported = Boolean(snapshot?.status?.firmwareFlags.lightbarControl) && !genericHidController;
+  const lightbarOverrideSupported = Boolean(snapshot?.status?.firmwareFlags.lightbarOverrideControl) && !genericHidController;
+  const muteButtonActionsSupported = Boolean(snapshot?.status?.firmwareFlags.muteButtonActions) && !genericHidController;
+  const adaptiveTriggersSupported = Boolean(snapshot?.status?.firmwareFlags.adaptiveTriggersControl) && !genericHidController;
   const usbSuspendDisconnectSupported = Boolean(snapshot?.status?.firmwareFlags.usbSuspendDisconnectControl);
   const wakeOnConnectSupported = Boolean(snapshot?.status?.firmwareFlags.wakeOnConnectControl);
-  const sleepControllerSupported = Boolean(snapshot?.status?.firmwareFlags.sleepControllerControl);
+  const sleepControllerSupported = Boolean(snapshot?.status?.firmwareFlags.sleepControllerControl) && !genericHidController;
   const pollingRateControlSupported = Boolean(snapshot?.status?.firmwareFlags.pollingRateControl);
   const hostPersonaControlSupported = Boolean(snapshot?.status?.firmwareFlags.hostPersonaControl);
-  const audioBufferLengthControlSupported = Boolean(snapshot?.status?.firmwareFlags.hapticsBufferLengthControl);
-  const audioReactiveHapticsSupported = Boolean(snapshot?.status?.firmwareFlags.audioReactiveHapticsControl);
+  const audioBufferLengthControlSupported = Boolean(snapshot?.status?.firmwareFlags.hapticsBufferLengthControl) && !genericHidController;
+  const audioReactiveHapticsSupported = Boolean(snapshot?.status?.firmwareFlags.audioReactiveHapticsControl) && !genericHidController;
   const supportedHostPersonaModes: HostPersonaMode[] = snapshot?.status?.supportedHostPersonaModes ?? ['dualsense'];
   const hostPersonaOptions = HOST_PERSONA_OPTIONS.filter(([, mode]) => (
     supportedHostPersonaModes.includes(mode) || snapshot?.settings.hostPersonaMode === mode
@@ -7535,6 +7547,7 @@ export function App() {
               <div>
                 <h2>Stick Deadzones</h2>
                 <p>Remove center drift with independent radial deadzones for each stick.</p>
+                {genericHidController ? <p>{GENERIC_HID_UNSUPPORTED_NOTE}</p> : null}
               </div>
             </div>
 
@@ -7556,6 +7569,7 @@ export function App() {
                     )
                   : null;
                 const disabled = !controllerControlsAvailable
+                  || genericHidController
                   || pendingAction !== null
                   || radialDeadzoneCommitPending;
                 return (
@@ -7669,6 +7683,7 @@ export function App() {
                 <div>
                   <h2>{audioHapticsOpen ? 'Audio Haptics' : 'Haptics'}</h2>
                   <p>{audioHapticsOpen ? 'Turn system audio into haptic feedback.' : 'Adjust controller haptic feedback and run a quick test.'}</p>
+                  {genericHidController ? <p>{GENERIC_HID_UNSUPPORTED_NOTE}</p> : null}
                 </div>
                 <div className="audio-heading-controls">
                   {audioReactiveHapticsModeBadgeLabel ? (
@@ -8132,6 +8147,7 @@ export function App() {
                 <div>
                   <h2>Audio</h2>
                   <p>{`Adjust controller ${outputControlLower} and microphone levels.`}</p>
+                  {genericHidController ? <p>{GENERIC_HID_UNSUPPORTED_NOTE}</p> : null}
                 </div>
                 <div className="audio-heading-actions">
                   <div className="chords-field chords-inline-field audio-speaker-gain-field">
@@ -8480,6 +8496,7 @@ export function App() {
                 <div>
                   <h2>{triggerLabOpen ? 'Trigger Lab' : 'Adaptive Triggers'}</h2>
                   <p>{triggerLabOpen ? 'Experimental adaptive trigger profile editor' : 'Set trigger effect intensity and test mode'}</p>
+                  {genericHidController ? <p>{GENERIC_HID_UNSUPPORTED_NOTE}</p> : null}
                 </div>
                 <div className="triggers-heading-controls">
                   {triggerLabEnabled && triggerLabAnyActive ? (
@@ -8672,6 +8689,7 @@ export function App() {
                 <div>
                   <h2>Lighting</h2>
                   <p>Customize the controller light bar and override behavior</p>
+                  {genericHidController ? <p>{GENERIC_HID_UNSUPPORTED_NOTE}</p> : null}
                 </div>
                 <div className="inline-switch">
                   <span>Enabled</span>

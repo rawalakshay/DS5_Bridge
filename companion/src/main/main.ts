@@ -155,6 +155,7 @@ function currentUiScalePercent(): UiScalePercent {
 function trayControllerName(type: NonNullable<BridgeSnapshot['status']>['controllerType'] | undefined): string {
   if (type === 'dualsense-edge') return 'DualSense Edge';
   if (type === 'dualsense') return 'DualSense';
+  if (type === 'generic-hid') return 'Generic Controller';
   return 'Controller';
 }
 

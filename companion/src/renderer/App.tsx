@@ -6740,8 +6740,9 @@ export function App() {
         <span className="bridge-wordmark" aria-label="DS5 Bridge">
           <BridgeMark />
           <span className="bridge-wordmark-ds">DS5</span>
-          <span className="bridge-wordmark-name">Bridge</span>
+          <span className="bridge-wordmark-name">Bridge Beta</span>
         </span>
+        {/* Titlebar "Explore Kitsune Input" badge — temporarily hidden.
         {!snapshot.settings.kitsuneInputPromotionDismissed && (
           <button
             className="kitsune-promotion-banner"
@@ -6760,6 +6761,7 @@ export function App() {
             <KitsuneInputWordmark />
           </button>
         )}
+        */}
         <div className="topbar-right">
           <div className="bridge-tools">
             <div className="notifications-control" ref={notificationsRef}>
@@ -7036,7 +7038,7 @@ export function App() {
             </nav>
           </div>
           <div className="sidebar-actions">
-            <div className="sidebar-support">
+            {/* <div className="sidebar-support">
               <button
                 className="sidebar-kofi-link"
                 type="button"
@@ -7045,7 +7047,7 @@ export function App() {
               >
                 <img className="sidebar-kofi-badge" src={kofiBadgeUrl} alt="" />
               </button>
-            </div>
+            </div> */}
             <div className="header-settings">
               <button
                 className={`sidebar-action-button ${showBridgeSettings ? 'active' : ''}`}

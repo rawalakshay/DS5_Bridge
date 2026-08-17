@@ -416,6 +416,26 @@ function isAppFileUrl(url: string, appIndexPath: string): boolean {
   }
 }
 
+function devServerUrl(): string | null {
+  const value = process.env.DS5_BRIDGE_DEV_SERVER_URL?.trim();
+  if (!value) return null;
+  try {
+    const parsed = new URL(value);
+    return parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1' ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function isDevServerUrl(url: string, devUrl: string | null): boolean {
+  if (!devUrl) return false;
+  try {
+    return new URL(url).origin === new URL(devUrl).origin;
+  } catch {
+    return false;
+  }
+}
+
 function isAllowedExternalUrl(url: string): boolean {
   return /^https:\/\/ko-fi\.com\/sundaymoments\/?$/i.test(url)
     || /^https:\/\/ko-fi\.com\/s\/d1f0a3b26f\/?$/i.test(url)
@@ -427,6 +447,7 @@ function isAllowedExternalUrl(url: string): boolean {
 function createWindow(uiScalePercent: UiScalePercent): BrowserWindow {
   const { width, height } = scaledWindowSize(uiScalePercent);
   const rendererIndexPath = path.join(__dirname, '..', '..', 'renderer', 'index.html');
+  const devUrl = devServerUrl();
   const window = new BrowserWindow({
     width,
     height,
@@ -465,7 +486,7 @@ function createWindow(uiScalePercent: UiScalePercent): BrowserWindow {
     return { action: 'deny' };
   });
   window.webContents.on('will-navigate', (event, url) => {
-    if (isAppFileUrl(url, rendererIndexPath)) {
+    if (isAppFileUrl(url, rendererIndexPath) || isDevServerUrl(url, devUrl)) {
       return;
     }
     event.preventDefault();
@@ -480,7 +501,11 @@ function createWindow(uiScalePercent: UiScalePercent): BrowserWindow {
   window.on('will-move', () => bridgeService?.pausePollingFor(1200));
   window.on('move', () => bridgeService?.pausePollingFor(700));
 
-  window.loadFile(rendererIndexPath);
+  if (devUrl) {
+    window.loadURL(devUrl);
+  } else {
+    window.loadFile(rendererIndexPath);
+  }
   window.webContents.once('did-finish-load', () => {
     applyWindowScale(window, uiScalePercent, false);
   });

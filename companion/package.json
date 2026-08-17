@@ -10,6 +10,7 @@
   "scripts": {
     "dev": "npm run build && electron .",
     "dev:ui": "npm run build:app && electron .",
+    "dev:hot": "tsc -p tsconfig.main.json && node scripts/dev-hot.mjs",
     "typecheck": "tsc -p tsconfig.main.json --noEmit && tsc -p tsconfig.json --noEmit",
     "build:audio-helper": "node scripts/run-dotnet-sdk.mjs publish native/AudioHelper/AudioHelper.csproj -c Release -r win-x64 --self-contained true -o native/AudioHelper/bin/publish/win-x64",
     "build:firmware-tools": "powershell -NoProfile -ExecutionPolicy Bypass -File ../tools/build-pico-universal-flash-nuke.ps1",
@@ -128,5 +129,6 @@
     "typescript": "^5.9.3",
     "vite": "^7.3.3",
     "vitest": "^4.0.16"
-  }
+  },
+  "packageManager": "pnpm@11.8.0+sha512.c1f5e7c4cb241c8f174b743851d82f42b802324afc8b0f116b96adb15aa06664948dde36960a3ba1079ba5b4b29dd0140135b94b5b5f5263592249d68e555f26"
 }

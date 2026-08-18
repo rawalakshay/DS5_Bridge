@@ -12,6 +12,7 @@
 #include "dualsense_output.h"
 #include "dualsense_battery_status.h"
 #include "firmware_log.h"
+#include "generic_hid_input_decoder.h"
 #include "host_input.h"
 #include "stellaris_diagnostics.h"
 #include "persona/host_persona.h"
@@ -33,7 +34,7 @@ namespace {
 
 constexpr uint8_t kMagic[] = {'D', 'S', '5', 'B'};
 constexpr uint8_t kProtocolMajor = 1;
-constexpr uint8_t kProtocolMinor = 22;
+constexpr uint8_t kProtocolMinor = 23;
 constexpr uint8_t kProtocolMinSupportedMinor = 7;
 static_assert(DS5_FIRMWARE_VERSION_MAJOR <= 255);
 static_assert(DS5_FIRMWARE_VERSION_MINOR <= 255);
@@ -1757,6 +1758,20 @@ uint16_t build_status(uint8_t *buffer, uint16_t reqlen) {
     buffer[48] = supported_host_persona_mask();
     buffer[49] = usb_wake_on_connect_enabled() ? 1 : 0;
     buffer[50] = companion_mic_muted ? 1 : 0;
+    // Protocol 1.23: which input layout the generic-pad decoder is running.
+    // The same pad reports a different shape and button numbering per pairing
+    // mode, so when a mapping is wrong this match is the whole diagnosis.
+    // Bytes 51-54 stay zero (from the memset) outside Stellaris mode, which
+    // doubles as "not applicable" for companions new enough to look.
+    if (bridge_mode_is_stellaris() && buffer[6]) {
+        HidGamepadLayout const &layout = generic_hid_active_layout();
+        // 0 = n/a; wire value is the HidLayoutSource enum shifted up one.
+        buffer[51] = static_cast<uint8_t>(generic_hid_layout_source()) + 1;
+        buffer[52] = layout.uses_report_id ? layout.report_id : 0;
+        const uint16_t report_bytes = static_cast<uint16_t>((layout.report_bits + 7u) / 8u);
+        buffer[53] = static_cast<uint8_t>(report_bytes > 255 ? 255 : report_bytes);
+        buffer[54] = layout.buttons_present ? layout.button_count : 0;
+    }
     buffer[56] = bt_speaker_output_gain();
     buffer[58] = lightbar_override_enabled ? 1 : 0;
     buffer[59] = mute_button_mode;

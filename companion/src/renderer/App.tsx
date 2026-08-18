@@ -3196,6 +3196,26 @@ export function App() {
   // (see the on_bt_data comment in main.cpp). Those controls are inert here, so
   // report them unsupported rather than letting the UI offer dead switches.
   const genericHidController = controllerConnected && liveControllerType === 'generic-hid';
+  // Sidebar tabs whose features have no hardware to drive on a generic pad.
+  // The firmware cuts every DualSense-bound output path in Stellaris mode and
+  // never runs the companion report rewriter that owns remap, chords, and
+  // deadzones, so these pages could only offer dead controls. Hidden rather
+  // than disabled so the sidebar only lists what actually works; Haptics stays
+  // because bt_stellaris_set_rumble() keeps its Rumble view live.
+  const hiddenControlTabs = useMemo<ReadonlySet<ControlTab>>(() => (
+    genericHidController
+      ? new Set<ControlTab>([
+        'audio',
+        'triggers',
+        'lighting',
+        'deadzones',
+        'remapping',
+        'chords',
+        'audio-haptics',
+        'trigger-lab'
+      ])
+      : new Set<ControlTab>()
+  ), [genericHidController]);
   const remapControllerType = snapshot?.status?.controllerConnected && liveControllerType && liveControllerType !== 'unknown'
     ? liveControllerType
     : lastRemapControllerType;
@@ -3412,11 +3432,31 @@ export function App() {
   }, [openControllerDeviceMenuKey]);
 
   useEffect(() => {
-    if (snapshot?.status?.controllerConnected && liveControllerType && liveControllerType !== 'unknown') {
+    // Remapping only ever applies to a DualSense, so a generic pad must not
+    // become the remembered remap layout -- storedRemapControllerType() would
+    // reject it from storage on the next launch anyway.
+    if (snapshot?.status?.controllerConnected
+      && (liveControllerType === 'dualsense' || liveControllerType === 'dualsense-edge')) {
       setLastRemapControllerType(liveControllerType);
       window.localStorage.setItem(LAST_REMAP_CONTROLLER_TYPE_STORAGE_KEY, liveControllerType);
     }
   }, [liveControllerType, snapshot?.status?.controllerConnected]);
+
+  useEffect(() => {
+    // A generic pad's only live feedback channel is classic rumble, so the
+    // Haptics page opens on the view that actually works.
+    if (genericHidController) {
+      setShowClassicRumbleControl(true);
+    }
+  }, [genericHidController]);
+
+  useEffect(() => {
+    // Entry points other than the sidebar (overview cards, restored state) can
+    // still land on a tab hidden for the connected controller; snap back.
+    if (hiddenControlTabs.has(activeControlTab)) {
+      selectControlTab('overview');
+    }
+  }, [activeControlTab, hiddenControlTabs]);
 
   useEffect(() => {
     if (chordFunctions.length === 0) {
@@ -3833,10 +3873,17 @@ export function App() {
   const audioBufferLengthControlSupported = Boolean(snapshot?.status?.firmwareFlags.hapticsBufferLengthControl) && !genericHidController;
   const audioReactiveHapticsSupported = Boolean(snapshot?.status?.firmwareFlags.audioReactiveHapticsControl) && !genericHidController;
   const supportedHostPersonaModes: HostPersonaMode[] = snapshot?.status?.supportedHostPersonaModes ?? ['dualsense'];
+  // A generic pad is always presented to Windows as an Xbox 360 device. The
+  // firmware would accept a switch to a Sony persona, but its input decode
+  // would then disagree with the presented identity, so don't offer one.
   const hostPersonaOptions = HOST_PERSONA_OPTIONS.filter(([, mode]) => (
-    supportedHostPersonaModes.includes(mode) || snapshot?.settings.hostPersonaMode === mode
+    genericHidController
+      ? mode === 'xbox'
+      : supportedHostPersonaModes.includes(mode) || snapshot?.settings.hostPersonaMode === mode
   ));
-  const overviewHostPersonaMode = personaTransition?.to ?? snapshot?.settings.hostPersonaMode ?? 'dualsense';
+  const overviewHostPersonaMode = genericHidController
+    ? 'xbox'
+    : personaTransition?.to ?? snapshot?.settings.hostPersonaMode ?? 'dualsense';
   const hapticsEnabled = Boolean(snapshot?.settings.hapticsEnabled);
   const audioReactiveHapticsEnabled = Boolean(snapshot?.settings.audioReactiveHapticsEnabled);
   const audioHapticsSessionByKey = useMemo(() => {
@@ -6993,8 +7040,12 @@ export function App() {
                 );
               })()}
               {CONTROL_TAB_GROUPS.map(({ id, label, Icon, tabs }) => {
+                const visibleTabs = tabs.filter(({ id: tabId }) => !hiddenControlTabs.has(tabId));
+                if (visibleTabs.length === 0) {
+                  return null;
+                }
                 const expanded = openControlGroupId === id;
-                const containsActiveTab = tabs.some(({ id: tabId }) => tabId === activeControlTab);
+                const containsActiveTab = visibleTabs.some(({ id: tabId }) => tabId === activeControlTab);
                 const triggerId = `control-group-${id}`;
                 const panelId = `control-group-panel-${id}`;
                 return (
@@ -7017,7 +7068,7 @@ export function App() {
                     <div id={panelId} className="control-tab-group-panel" aria-hidden={!expanded}>
                       <div className="control-tab-group-clip">
                         <div className="control-tab-group-items" role="group" aria-labelledby={triggerId}>
-                          {tabs.map(({ id: tabId, label: tabLabel, Icon: TabIcon }) => (
+                          {visibleTabs.map(({ id: tabId, label: tabLabel, Icon: TabIcon }) => (
                             <button
                               key={tabId}
                               id={`control-tab-${tabId}`}
@@ -7118,41 +7169,47 @@ export function App() {
                 </div>
               </button>
 
-              <button className="overview-card" type="button" onClick={() => selectControlTab('audio')}>
-                <div className="overview-card-title">
-                  <span className="feature-icon overview-icon"><IconBinary size={26} /></span>
-                  <h3>Audio Path</h3>
-                </div>
-                <div className="overview-fields">
-                  <div>
-                    <span>Route</span>
-                    <strong className={overviewAudioPathState === 'Pico Local' ? 'success-value' : ''}>
-                      {overviewAudioPathState}
-                    </strong>
+              {/* A generic pad has no audio path over the bridge, so these two
+                  cards would only advertise (and navigate to) a hidden tab. */}
+              {!genericHidController && (
+                <button className="overview-card" type="button" onClick={() => selectControlTab('audio')}>
+                  <div className="overview-card-title">
+                    <span className="feature-icon overview-icon"><IconBinary size={26} /></span>
+                    <h3>Audio Path</h3>
                   </div>
-                  <div>
-                    <span>Status</span>
-                    <strong>{overviewAudioPathDetail}</strong>
+                  <div className="overview-fields">
+                    <div>
+                      <span>Route</span>
+                      <strong className={overviewAudioPathState === 'Pico Local' ? 'success-value' : ''}>
+                        {overviewAudioPathState}
+                      </strong>
+                    </div>
+                    <div>
+                      <span>Status</span>
+                      <strong>{overviewAudioPathDetail}</strong>
+                    </div>
                   </div>
-                </div>
-              </button>
+                </button>
+              )}
 
-              <button className="overview-card" type="button" onClick={() => selectControlTab('audio')}>
-                <div className="overview-card-title">
-                  <span className="feature-icon overview-icon"><Volume2 size={19} /></span>
-                  <h3>Audio</h3>
-                </div>
-                <div className="overview-fields">
-                  <div>
-                    <span>Route</span>
-                    <strong>{overviewAudioOutputLabel}</strong>
+              {!genericHidController && (
+                <button className="overview-card" type="button" onClick={() => selectControlTab('audio')}>
+                  <div className="overview-card-title">
+                    <span className="feature-icon overview-icon"><Volume2 size={19} /></span>
+                    <h3>Audio</h3>
                   </div>
-                  <div>
-                    <span>Volume</span>
-                    <strong>{overviewSpeakerVolumeValue}</strong>
+                  <div className="overview-fields">
+                    <div>
+                      <span>Route</span>
+                      <strong>{overviewAudioOutputLabel}</strong>
+                    </div>
+                    <div>
+                      <span>Volume</span>
+                      <strong>{overviewSpeakerVolumeValue}</strong>
+                    </div>
                   </div>
-                </div>
-              </button>
+                </button>
+              )}
 
               <button className="overview-card" type="button" onClick={() => selectControlTab('system')}>
                 <div className="overview-card-title">
@@ -7189,7 +7246,7 @@ export function App() {
                     onClick={runFeedbackTest}
                   >
                     <Play size={15} />
-                    Test Haptics
+                    {showClassicRumbleControl ? 'Test Rumble' : 'Test Haptics'}
                   </button>
                   <button
                     type="button"
@@ -7225,6 +7282,7 @@ export function App() {
                       || !hostPersonaControlSupported
                       || pendingAction !== null
                       || personaTransitionActive
+                      || (genericHidController && mode !== 'xbox')
                       || (!supported && !active);
                     return (
                       <button
@@ -7234,7 +7292,9 @@ export function App() {
                         aria-pressed={active}
                         aria-label={`Switch to ${label} mode`}
                         disabled={disabled}
-                        title={`Switch to ${label} mode`}
+                        title={genericHidController && mode !== 'xbox'
+                          ? 'A generic controller is always presented as Xbox 360'
+                          : `Switch to ${label} mode`}
                         onClick={() => {
                           if (!active) {
                             setHostPersonaMode(mode);
@@ -7613,7 +7673,7 @@ export function App() {
                       </div>
                       <div className="deadzone-preview-copy">
                         <strong>{value}%</strong>
-                        <span>{value === 0 ? 'Native input' : 'Center radius'}</span>
+                        <span>{genericHidController ? 'Live preview needs a DualSense' : value === 0 ? 'Native input' : 'Center radius'}</span>
                         <div className="deadzone-position-legend" aria-label="Stick position legend">
                           <span><i className="physical" />Physical</span>
                           <span><i className="output" />Output</span>
@@ -7689,7 +7749,9 @@ export function App() {
                 <div>
                   <h2>{audioHapticsOpen ? 'Audio Haptics' : 'Haptics'}</h2>
                   <p>{audioHapticsOpen ? 'Turn system audio into haptic feedback.' : 'Adjust controller haptic feedback and run a quick test.'}</p>
-                  {genericHidController ? <p>{GENERIC_HID_UNSUPPORTED_NOTE}</p> : null}
+                  {/* Classic rumble is the one output path a generic pad keeps,
+                      so the note only applies to the haptics view. */}
+                  {genericHidController && !showClassicRumbleControl ? <p>{GENERIC_HID_UNSUPPORTED_NOTE}</p> : null}
                 </div>
                 <div className="audio-heading-controls">
                   {audioReactiveHapticsModeBadgeLabel ? (
@@ -7955,6 +8017,8 @@ export function App() {
                         role="tab"
                         aria-selected={!showClassicRumbleControl}
                         className={!showClassicRumbleControl ? 'active' : ''}
+                        disabled={genericHidController}
+                        title={genericHidController ? GENERIC_HID_UNSUPPORTED_NOTE : undefined}
                         onClick={() => setShowClassicRumbleControl(false)}
                       >
                         Haptics
@@ -8908,6 +8972,7 @@ export function App() {
                 <div>
                   <h2>Button Remapping</h2>
                   <p>Choose replacement targets for controller button slots.</p>
+                  {genericHidController ? <p>{GENERIC_HID_UNSUPPORTED_NOTE}</p> : null}
                 </div>
                 <div className="profile-controls">
                   <CustomSelect
@@ -9143,6 +9208,7 @@ export function App() {
                 <div>
                   <h2>Chords</h2>
                   <p>Assign reusable functions to controller buttons and starter chords.</p>
+                  {genericHidController ? <p>{GENERIC_HID_UNSUPPORTED_NOTE}</p> : null}
                 </div>
               </div>
 
@@ -9865,8 +9931,8 @@ export function App() {
                       <div className="device-row device-control-row">
                         <span>Host Controller</span>
                         <CustomSelect
-                          value={snapshot.settings.hostPersonaMode}
-                          disabled={!connected || !hostPersonaControlSupported || pendingAction !== null || personaTransitionActive}
+                          value={genericHidController ? 'xbox' : snapshot.settings.hostPersonaMode}
+                          disabled={!connected || !hostPersonaControlSupported || pendingAction !== null || personaTransitionActive || genericHidController}
                           options={hostPersonaOptions.length > 0 ? hostPersonaOptions : HOST_PERSONA_OPTIONS.slice(0, 1)}
                           className="host-persona-selector"
                           ariaLabel="Host controller persona"

@@ -4,7 +4,7 @@ export const REPORT_LENGTH = 64;
 export const PAYLOAD_LENGTH = 63;
 export const MAGIC = 'DS5B';
 export const PROTOCOL_MAJOR = 1;
-export const PROTOCOL_MINOR = 22;
+export const PROTOCOL_MINOR = 23;
 
 export const REPORT_ID = {
   STATUS: 0x01,
@@ -452,6 +452,20 @@ export const MUTE_KEYBOARD_HOLD_FLAG = 0x80;
 export const MUTE_KEYBOARD_CHORD_STARTER_FLAG = 0x10;
 export const MUTE_KEYBOARD_MODIFIER_MASK = 0x0f;
 
+// Which input layout the firmware's generic-pad decoder is running. The same
+// pad reports a different shape and button numbering per pairing mode, so when
+// a mapping is wrong this match is the whole diagnosis. Reported from protocol
+// 1.23; null from older firmware, with no controller, or with a DualSense.
+export interface GenericHidLayoutInfo {
+  // 'verified' matched a layout checked against real hardware by report ID and
+  // length; 'descriptor' was parsed from the pad's own report descriptor;
+  // 'guess' is the built-in fallback with the report ID adopted from the wire.
+  source: 'guess' | 'verified' | 'descriptor';
+  reportId: number;
+  reportLength: number;
+  buttonCount: number;
+}
+
 export interface BridgeStatusPayload {
   controllerConnected: boolean;
   controllerType: 'unknown' | 'dualsense' | 'dualsense-edge' | 'generic-hid';
@@ -519,6 +533,7 @@ export interface BridgeStatusPayload {
   };
   hostPersonaMode: HostPersonaMode;
   supportedHostPersonaModes: HostPersonaMode[];
+  genericHidLayout: GenericHidLayoutInfo | null;
   protocolVersion: string;
 }
 
@@ -821,6 +836,28 @@ function supportedHostPersonaModes(mask: number): HostPersonaMode[] {
   return modes.length === 0 ? ['dualsense'] : modes;
 }
 
+function genericHidLayout(report: ArrayLike<number>): GenericHidLayoutInfo | null {
+  // Bytes 52-55 were reserved zeros before protocol 1.23, so gate on the
+  // reported minor rather than trusting stale zeros to mean "not applicable".
+  if (report[6] < 23) return null;
+  // 0 = not applicable (DualSense or nothing connected); the wire value is the
+  // firmware HidLayoutSource enum shifted up one.
+  const source = report[52] === 1
+    ? 'guess'
+    : report[52] === 2
+      ? 'verified'
+      : report[52] === 3
+        ? 'descriptor'
+        : null;
+  if (source === null) return null;
+  return {
+    source,
+    reportId: report[53],
+    reportLength: report[54],
+    buttonCount: report[55]
+  };
+}
+
 export function parseStatusReport(report: ArrayLike<number>): BridgeStatusPayload {
   assertReport(report, REPORT_ID.STATUS);
   assertVersion(report);
@@ -898,6 +935,7 @@ export function parseStatusReport(report: ArrayLike<number>): BridgeStatusPayloa
     },
     hostPersonaMode: hostPersonaMode(report[48]),
     supportedHostPersonaModes: supportedHostPersonaModes(report[49]),
+    genericHidLayout: genericHidLayout(report),
     protocolVersion: `${report[5]}.${report[6]}`
   };
 }

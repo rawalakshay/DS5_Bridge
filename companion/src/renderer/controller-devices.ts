@@ -1,6 +1,7 @@
 import type {
   BridgeStatusPayload,
-  CompanionDeviceIdentityPayload
+  CompanionDeviceIdentityPayload,
+  GenericHidLayoutInfo
 } from '../shared/protocol';
 
 export const CONTROLLER_DEVICE_CACHE_STORAGE_KEY = 'ds5bridge.controllerDeviceCache.v1';
@@ -28,7 +29,7 @@ export interface ControllerDeviceStorage {
 }
 
 export interface DevicesInfoRow {
-  id: 'controller' | 'address' | 'pairing' | 'vendor-product' | 'power';
+  id: 'controller' | 'address' | 'pairing' | 'vendor-product' | 'hid-layout' | 'power';
   label: string;
   value: string;
 }
@@ -302,7 +303,21 @@ function deviceTitle(device: CachedControllerDevice): string {
     || controllerDeviceName(device.controllerType, device.controllerName);
 }
 
-function infoRows(device: CachedControllerDevice): DevicesInfoRow[] {
+// One line of "how is this pad being decoded", e.g. "Verified · 0x03 · 9 B".
+// The report ID + length pair is what the firmware matches layouts on, so when
+// a pad's buttons come out wrong this is the fact worth reading back.
+export function genericHidLayoutLabel(layout: GenericHidLayoutInfo): string {
+  const source = layout.source === 'verified'
+    ? 'Verified'
+    : layout.source === 'descriptor' ? 'Descriptor' : 'Fallback';
+  const reportId = `0x${layout.reportId.toString(16).padStart(2, '0').toUpperCase()}`;
+  return `${source} · ${reportId} · ${layout.reportLength} B`;
+}
+
+function infoRows(
+  device: CachedControllerDevice,
+  genericHidLayout: GenericHidLayoutInfo | null = null
+): DevicesInfoRow[] {
   const actualName = controllerDeviceName(device.controllerType, device.controllerName);
   return [
     ...(device.customName
@@ -315,6 +330,15 @@ function infoRows(device: CachedControllerDevice): DevicesInfoRow[] {
       value: device.linkKeyKnown ? 'Standard key' : 'Address only'
     },
     { id: 'vendor-product', label: 'VID / PID', value: vendorProductLabel(device) },
+    // Live generic pads only: cached entries may reconnect in a different
+    // pairing mode with a different report shape, so a stored layout would lie.
+    ...(device.controllerType === 'generic-hid' && genericHidLayout
+      ? [{
+          id: 'hid-layout',
+          label: 'Input layout',
+          value: genericHidLayoutLabel(genericHidLayout)
+        } as const]
+      : []),
     {
       id: 'power',
       label: 'Power',
@@ -362,7 +386,7 @@ export function buildDevicesModel(input: {
       title: deviceTitle(device),
       status: live ? 'Connected' : input.bridgeConnected ? 'Not connected' : 'Bridge offline',
       bluetoothAddress: device.bluetoothAddress,
-      infoRows: infoRows(device),
+      infoRows: infoRows(device, live ? input.status?.genericHidLayout ?? null : null),
       tone: live ? 'connected' : 'cached',
       forgetDisabled: !input.bridgeConnected || input.pendingAction !== null,
       forgetTitle: input.bridgeConnected

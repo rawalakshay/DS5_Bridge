@@ -128,6 +128,44 @@ describe('controller device cache', () => {
     });
   });
 
+  it('shows the live input layout for a generic pad and only for the live card', () => {
+    const model = buildDevicesModel({
+      bridgeConnected: true,
+      status: {
+        ...status('generic-hid', 55),
+        genericHidLayout: { source: 'verified', reportId: 3, reportLength: 9, buttonCount: 16 }
+      } as BridgeStatusPayload,
+      identity: identity('11:22:33:44:55:66', { controllerName: 'Stellaris' }),
+      cachedDevices: [device('AA:BB:CC:DD:EE:FF', 10)],
+      pendingAction: null,
+      now: 50
+    });
+
+    const [live, cached] = model.cards;
+    expect(live?.label).toBe('Current controller');
+    expect(live?.infoRows.find((row) => row.id === 'hid-layout')?.value)
+      .toBe('Verified · 0x03 · 9 B');
+    // Cached entries may reconnect in a different pairing mode with a
+    // different report shape, so no layout row is carried over to them.
+    expect(cached?.infoRows.some((row) => row.id === 'hid-layout')).toBe(false);
+  });
+
+  it('never attaches an input layout row to a DualSense card', () => {
+    const model = buildDevicesModel({
+      bridgeConnected: true,
+      status: {
+        ...status('dualsense', 80),
+        genericHidLayout: null
+      } as BridgeStatusPayload,
+      identity: identity('AA:BB:CC:DD:EE:FF'),
+      cachedDevices: [],
+      pendingAction: null,
+      now: 50
+    });
+
+    expect(model.cards[0]?.infoRows.some((row) => row.id === 'hid-layout')).toBe(false);
+  });
+
   it('keeps only unique address-backed history up to the cache limit', () => {
     const devices = Array.from({ length: CONTROLLER_DEVICE_CACHE_LIMIT + 2 }, (_, index) => (
       device(`AA:BB:CC:DD:EE:${index.toString(16).padStart(2, '0').toUpperCase()}`, index)

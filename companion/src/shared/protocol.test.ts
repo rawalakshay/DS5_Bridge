@@ -189,6 +189,47 @@ describe('companion protocol', () => {
     expect(status.controllerType).toBe('generic-hid');
   });
 
+  it('parses the generic HID input layout added in protocol 1.23', () => {
+    const report = baseReport(REPORT_ID.STATUS);
+    report[7] = 1;
+    report[8] = 3;
+    report[52] = 2; // verified layout
+    report[53] = 0x03;
+    report[54] = 9;
+    report[55] = 16;
+
+    expect(parseStatusReport(report).genericHidLayout).toEqual({
+      source: 'verified',
+      reportId: 0x03,
+      reportLength: 9,
+      buttonCount: 16
+    });
+
+    report[52] = 1;
+    expect(parseStatusReport(report).genericHidLayout?.source).toBe('guess');
+    report[52] = 3;
+    expect(parseStatusReport(report).genericHidLayout?.source).toBe('descriptor');
+  });
+
+  it('reports no generic HID layout when firmware marks it not applicable', () => {
+    // Byte 52 stays zero with a DualSense connected or nothing connected.
+    const report = baseReport(REPORT_ID.STATUS);
+    report[7] = 1;
+    report[8] = 1;
+
+    expect(parseStatusReport(report).genericHidLayout).toBeNull();
+  });
+
+  it('rejects unknown layout source values instead of inventing one', () => {
+    const report = baseReport(REPORT_ID.STATUS);
+    report[7] = 1;
+    report[8] = 3;
+    report[52] = 9;
+    report[53] = 0x03;
+
+    expect(parseStatusReport(report).genericHidLayout).toBeNull();
+  });
+
   it('falls back to an unknown controller type for unrecognised values', () => {
     const report = baseReport(REPORT_ID.STATUS);
     report[7] = 1;

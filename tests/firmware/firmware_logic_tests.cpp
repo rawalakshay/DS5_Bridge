@@ -2150,6 +2150,77 @@ void generic_hid_decoder_ignores_short_reports_when_adopting_report_id() {
     generic_hid_reset();
 }
 
+void generic_hid_decoder_activity_verdict_feeds_idle_disconnect() {
+    generic_hid_reset();
+    EXPECT_FALSE(generic_hid_last_report_active());
+
+    // Stellaris Android-mode shape: ID, LX, LY, RX, RY, hat, buttons 1-8,
+    // buttons 9-16, R2 analog, L2 analog, spare.
+    BridgeControllerState state{};
+    std::array<uint8_t, 11> report{
+        0x07, 0x80, 0x80, 0x80, 0x80, 0x0F, 0x00, 0x00, 0x00, 0x00, 0x00};
+    EXPECT_TRUE(generic_hid_decode_input_report(
+        report.data(), static_cast<uint16_t>(report.size()), state));
+    EXPECT_FALSE(generic_hid_last_report_active());
+
+    // Centre drift inside the 120..140 rest band must still read as idle, or a
+    // worn stick defeats the idle timeout entirely.
+    report[1] = 122;
+    report[4] = 139;
+    EXPECT_TRUE(generic_hid_decode_input_report(
+        report.data(), static_cast<uint16_t>(report.size()), state));
+    EXPECT_FALSE(generic_hid_last_report_active());
+
+    // Trigger residue just above zero is rest; a real pull is activity.
+    report[1] = 0x80;
+    report[4] = 0x80;
+    report[9] = 6; // L2 analog.
+    EXPECT_TRUE(generic_hid_decode_input_report(
+        report.data(), static_cast<uint16_t>(report.size()), state));
+    EXPECT_FALSE(generic_hid_last_report_active());
+    report[9] = 0x60;
+    EXPECT_TRUE(generic_hid_decode_input_report(
+        report.data(), static_cast<uint16_t>(report.size()), state));
+    EXPECT_TRUE(generic_hid_last_report_active());
+
+    // A held stick is activity, and releasing everything reads idle again.
+    report[9] = 0x00;
+    report[2] = 0xFF; // Left stick Y.
+    EXPECT_TRUE(generic_hid_decode_input_report(
+        report.data(), static_cast<uint16_t>(report.size()), state));
+    EXPECT_TRUE(generic_hid_last_report_active());
+    report[2] = 0x80;
+    EXPECT_TRUE(generic_hid_decode_input_report(
+        report.data(), static_cast<uint16_t>(report.size()), state));
+    EXPECT_FALSE(generic_hid_last_report_active());
+
+    // Buttons are judged from the raw mask, so one outside the Android name
+    // map still counts as a player holding the pad.
+    report[7] = 0x80; // Button 16.
+    EXPECT_TRUE(generic_hid_decode_input_report(
+        report.data(), static_cast<uint16_t>(report.size()), state));
+    EXPECT_TRUE(generic_hid_last_report_active());
+
+    // A report the locked layout rejects must not overwrite the verdict: the
+    // pad is still held, this frame just could not be read.
+    const std::array<uint8_t, 11> foreign{
+        0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    BridgeControllerState untouched{};
+    EXPECT_FALSE(generic_hid_decode_input_report(
+        foreign.data(), static_cast<uint16_t>(foreign.size()), untouched));
+    EXPECT_TRUE(generic_hid_last_report_active());
+
+    // Hat engagement alone is activity.
+    report[7] = 0x00;
+    report[5] = 0x02; // East.
+    EXPECT_TRUE(generic_hid_decode_input_report(
+        report.data(), static_cast<uint16_t>(report.size()), state));
+    EXPECT_TRUE(generic_hid_last_report_active());
+
+    generic_hid_reset();
+    EXPECT_FALSE(generic_hid_last_report_active());
+}
+
 struct TestCase {
     char const *name;
     void (*run)();
@@ -2168,6 +2239,7 @@ std::vector<TestCase> tests{
     {"both decoders are co-resident and independent", both_decoders_are_co_resident_and_independent},
     {"switch rumble encoder scales amplitude and preserves neutral", switch_rumble_encoder_scales_amplitude_and_preserves_neutral},
     {"generic hid decoder ignores short reports when adopting report id", generic_hid_decoder_ignores_short_reports_when_adopting_report_id},
+    {"generic hid decoder activity verdict feeds idle disconnect", generic_hid_decoder_activity_verdict_feeds_idle_disconnect},
     {"scheduler prioritizes due audio over old state", scheduler_prioritizes_due_audio_over_old_state},
     {"scheduler sends coalesced state when audio is absent", scheduler_sends_coalesced_state_when_audio_is_absent},
     {"scheduler due audio stays ahead of coalesced state", scheduler_due_audio_stays_ahead_of_coalesced_state},

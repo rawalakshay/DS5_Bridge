@@ -1131,6 +1131,23 @@ void assert_bluetooth_pairing_and_reconnect_policy(std::filesystem::path const &
         );
     }
 
+    // The idle disconnect must judge activity in the connected pad's own report
+    // format. The DualSense byte test reads a generic pad's layout-defined
+    // reports as permanently idle, which disconnected a live game exactly
+    // idle_disconnect_timeout_minutes after connect; in Stellaris mode the
+    // verdict has to come from the generic decoder that consumed the packet.
+    if (
+        bt_cpp.find("const bool meaningful_input_activity = bridge_mode_is_stellaris()")
+            == std::string::npos
+        || bt_cpp.find("? generic_hid_last_report_active()") == std::string::npos
+        || bt_cpp.find(": controller_input_report_is_active(packet, size);")
+            == std::string::npos
+    ) {
+        throw std::runtime_error(
+            "Stellaris idle disconnect must use the generic decoder's activity verdict, not the DualSense report test"
+        );
+    }
+
     const std::string link_key_notification = extract_between(
         bt_cpp,
         "case HCI_EVENT_LINK_KEY_NOTIFICATION: {",

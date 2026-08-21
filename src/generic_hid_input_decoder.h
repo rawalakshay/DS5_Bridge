@@ -62,6 +62,14 @@ inline constexpr uint16_t kHidHatCentred = 0xFFFF;
 uint32_t generic_hid_last_button_mask();
 uint16_t generic_hid_last_hat_value();
 
+// Whether the most recent successfully decoded report showed player activity:
+// any button down, hat off centre, a stick outside its rest band, or a trigger
+// clearly above rest. Feeds the Bluetooth idle-disconnect timer, which only
+// understands the DualSense report format and would otherwise read a generic
+// pad as permanently idle and drop it mid-game. Reports the layout rejects do
+// not change the verdict; false after reset until a report decodes.
+bool generic_hid_last_report_active();
+
 // Every distinct report ID the pad has sent, whether or not the active layout
 // accepts it. A pad that splits its controls across several reports would
 // otherwise look like it simply has no analog triggers, because the decoder

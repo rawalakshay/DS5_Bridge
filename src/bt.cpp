@@ -4597,8 +4597,14 @@ static __attribute__((noinline)) void l2cap_packet_handler_cold(
             bt_data_callback(INTERRUPT, packet, size);
 
             const uint64_t now_us = time_us_64();
-            const bool meaningful_input_activity =
-                controller_input_report_is_active(packet, size);
+            // A generic pad's report shape is layout-defined, so the DualSense
+            // format test reads every one of its reports as idle and the idle
+            // timeout below would disconnect the pad mid-game. bt_data_callback
+            // above has already decoded this packet, so in Stellaris mode ask
+            // the decoder for its verdict instead.
+            const bool meaningful_input_activity = bridge_mode_is_stellaris()
+                ? generic_hid_last_report_active()
+                : controller_input_report_is_active(packet, size);
             if (meaningful_input_activity) {
                 inactive_time = now_us;
                 arm_signal_strength_idle_epoch(now_us);

@@ -168,6 +168,21 @@ uint8_t last_report[kLastReportCapacity];
 uint16_t last_report_len = 0;
 uint32_t last_button_mask = 0;
 uint16_t last_hat_value = kHidHatCentred;
+bool last_report_active = false;
+
+// Rest band for the activity verdict, mirroring the DualSense idle heuristic in
+// bt.cpp (raw stick bytes 120..140 around the 0x80 centre). Deliberately wider
+// than a gameplay deadzone: misreading centre drift as play merely delays the
+// idle timeout, but misreading a held stick as rest disconnects a live game.
+constexpr uint8_t kStickRestBandMin = 120;
+constexpr uint8_t kStickRestBandMax = 140;
+// Analog triggers on this class of pad do not always spring back to exactly
+// zero, so rest tolerates a few counts of residue.
+constexpr uint8_t kTriggerRestCeiling = 8;
+
+bool stick_outside_rest_band(uint8_t value) {
+    return value < kStickRestBandMin || value > kStickRestBandMax;
+}
 uint8_t seen_report_ids[kHidMaxSeenReportIds];
 uint8_t seen_report_id_count = 0;
 
@@ -330,6 +345,7 @@ void generic_hid_reset() {
     last_report_len = 0;
     last_button_mask = 0;
     last_hat_value = kHidHatCentred;
+    last_report_active = false;
     consecutive_report_id_rejections = 0;
     seen_report_id_count = 0;
     byte_activity_width = 0;
@@ -399,6 +415,10 @@ uint32_t generic_hid_last_button_mask() {
 
 uint16_t generic_hid_last_hat_value() {
     return last_hat_value;
+}
+
+bool generic_hid_last_report_active() {
+    return last_report_active;
 }
 
 uint16_t generic_hid_last_report(uint8_t *out, uint16_t capacity) {
@@ -575,6 +595,19 @@ bool generic_hid_decode_input_report(
         state.left_trigger = state.l2_pressed ? 0xFF : 0x00;
         state.right_trigger = state.r2_pressed ? 0xFF : 0x00;
     }
+
+    // Verdict for the idle-disconnect timer in bt.cpp, which cannot judge a
+    // layout-defined report on its own. Buttons come from the raw mask so a
+    // button outside the name map still counts as a player holding the pad.
+    last_report_active =
+        last_button_mask != 0
+        || last_hat_value != kHidHatCentred
+        || stick_outside_rest_band(state.left_stick_x)
+        || stick_outside_rest_band(state.left_stick_y)
+        || stick_outside_rest_band(state.right_stick_x)
+        || stick_outside_rest_band(state.right_stick_y)
+        || state.left_trigger > kTriggerRestCeiling
+        || state.right_trigger > kTriggerRestCeiling;
 
     return true;
 }

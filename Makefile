@@ -6,6 +6,7 @@
 #   make pico-build               Pico 2 W, Release, companion interface on
 #   make DIAGNOSTICS=traces       diagnostic build (see docs/diagnostics.md)
 #   make test                     host-side firmware tests (no Pico SDK needed)
+#   make rebuild-all              clean + rebuild firmware UF2 and companion (Windows)
 #   make clean                    remove build trees, keep built UF2s
 #   make help                     list targets and current settings
 #
@@ -68,7 +69,7 @@ CMAKE_FLAGS = -G $(GENERATOR) \
 	-DENABLE_COMPANION=ON \
 	-DDS5_DIAGNOSTICS_PRESET=$(DIAGNOSTICS)
 
-.PHONY: pico-build test clean help check-sdk
+.PHONY: pico-build test clean help check-sdk rebuild-all
 
 pico-build: check-sdk | $(OUTPUT_DIR)
 	cmake -S . -B $(PICO2W_BUILD_DIR) $(CMAKE_FLAGS)
@@ -96,6 +97,14 @@ $(OUTPUT_DIR):
 clean:
 	rm -rf $(BUILD_ROOT) $(TEST_BUILD_DIR)
 	@echo "Removed build trees. $(OUTPUT_DIR)/ was left untouched."
+
+# Clean rebuild of both deliverables: wipes build trees, built UF2s and companion
+# output, then builds a fresh UF2 and the companion installer. Windows-only; the
+# work is done by tools/rebuild-all.ps1, which also loads MSVC for the SDK host
+# tools. WAVESHARE=1 targets the Waveshare board, UNPACKED=1 skips the installer.
+# PICO_SDK_PATH is read from the environment/command line by the script itself.
+rebuild-all:
+	powershell -NoProfile -ExecutionPolicy Bypass -File tools/rebuild-all.ps1 		-Diagnostics $(DIAGNOSTICS) 		$(if $(WAVESHARE),-Waveshare) 		$(if $(UNPACKED),-Unpacked)
 
 check-sdk:
 	@if [ -z "$(PICO_SDK_PATH)" ]; then \
@@ -129,6 +138,7 @@ help:
 	@echo "  pico-build       Build the firmware for Pico 2 W (default)"
 	@echo "  test             Run host-side firmware tests (no Pico SDK required)"
 	@echo "  clean            Remove build trees, keeping built UF2s"
+	@echo "  rebuild-all      Clean + rebuild firmware UF2 and companion installer (Windows)"
 	@echo ""
 	@echo "Settings:"
 	@echo "  PICO_SDK_PATH = $(if $(PICO_SDK_PATH),$(PICO_SDK_PATH),(unset))"
